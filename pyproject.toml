@@ -1,0 +1,97 @@
+[project]
+name = "water-agents"
+version = "0.1.0"
+description = "黄河吕梁段防汛预警智能体"
+requires-python = ">=3.10"
+
+# ====== pytest 配置 ======
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["backend/tests", "train/tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+filterwarnings = [
+    "ignore::DeprecationWarning:langchain.*",
+    "ignore::DeprecationWarning:pydantic.*",
+]
+markers = [
+    "unit: 单元测试（纯函数，无外部依赖）",
+    "integration: 集成测试（需要外部服务如 Qdrant/LLM）",
+    "slow: 耗时较长的测试",
+]
+
+# ====== 覆盖率配置 ======
+[tool.coverage.run]
+source = ["agent", "backend/app"]
+omit = [
+    "*/tests/*",
+    "*/__init__.py",
+    "*/build_*.py",
+    "*/inspect_*.py",
+    "*/test_*.py",
+]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "logger\\.debug",
+]
+show_missing = true
+skip_covered = false
+precision = 2
+
+[tool.coverage.xml]
+output = "backend/coverage.xml"
+
+# ====== Ruff lint 配置 ======
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+extend-exclude = [
+    "tools/qdrant",
+    "data/raw",
+    "frontend",
+]
+
+[tool.ruff.lint]
+# 启用的规则集
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "UP",   # pyupgrade
+    "N",    # pep8-naming
+    "SIM",  # flake8-simplify
+]
+ignore = [
+    "E501",   # line too long（交给 formatter 处理）
+    "B008",   # Do not perform function call in argument defaults（FastAPI Depends 需要）
+    "B904",   # raise from（部分场景不需要）
+    "N805",   # first argument of method should be self（Pydantic validator 例外）
+    "N818",   # error suffix on exception names（LLMError 等已有命名规范）
+    "SIM108", # if-else 三元表达式（可读性优先）
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]  # __init__.py 允许未使用 import（用于 re-export）
+"tests/*" = ["B011"]      # 测试代码允许 assert False
+"backend/build_*.py" = ["N999"]  # 构建脚本允许非标准模块名
+
+[tool.ruff.lint.isort]
+known-first-party = ["agent", "app", "backend", "train"]
+known-third-party = ["fastapi", "pydantic", "openai", "langgraph", "qdrant_client"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"

@@ -1,0 +1,22 @@
+sft_model: train/lora/outputs/sft/merged   # 从 SFT 合并权重出发
+output_dir: train/grpo/outputs
+n_prompts: 512
+grpo:
+  group_size: 8            # OOM → 4
+  temperature: 1.0
+  max_completion_length: 1024
+  lr: 1.0e-6
+  beta: 0.04               # KL 系数
+  epochs: 2
+  per_device_batch: 1
+  grad_accum: 8
+  gradient_checkpointing: true
+  save_steps: 50
+  seed: 42
+vllm:
+  mode: colocate
+  gpu_memory_utilization: 0.35   # OOM → 0.25
+smoke:
+  enabled: false
+  n_prompts: 8
+  max_steps: 3

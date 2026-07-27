@@ -1,0 +1,30 @@
+base_model: Qwen/Qwen2.5-7B-Instruct
+data: train/lora/data/hermes_fc_v1.jsonl
+val_data: train/lora/data/hermes_fc_v1.val.jsonl
+output_dir: train/lora/outputs/sft
+max_len: 4096
+qlora:
+  load_in_4bit: true
+  bnb_4bit_quant_type: nf4
+  bnb_4bit_use_double_quant: true
+  compute_dtype: bfloat16
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+train:
+  per_device_batch: 2
+  grad_accum: 16
+  lr: 1.0e-4
+  epochs: 3
+  warmup_ratio: 0.03
+  lr_scheduler: cosine
+  gradient_checkpointing: true
+  logging_steps: 10
+  save_steps: 200
+  seed: 42
+smoke:
+  enabled: false   # --smoke 时覆盖为 true
+  n_samples: 10
+  max_steps: 5

@@ -1,0 +1,85 @@
+name: wateragents
+
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.12.6
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "bash", "-c", ":> /dev/tcp/localhost/6333"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  vllm:
+    image: vllm/vllm-openai:v0.7.3
+    profiles: ["local-llm"]   # 用本地微调模型时启用：docker compose --profile local-llm up
+    # 注意：--enable-auto-tool-choice --tool-call-parser hermes 必需，
+    # 否则服务端不解析 <tool_call>，planner 的 Function Calling 链路失效
+    command: >
+      --model /models/grpo-merged
+      --served-model-name water-agent-fc
+      --max-model-len 8192
+      --gpu-memory-utilization 0.85
+      --enable-auto-tool-choice
+      --tool-call-parser hermes
+    volumes:
+      - ${MODEL_DIR:-../train/grpo/outputs}:/models:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 20
+
+  backend:
+    build:
+      context: ..
+      dockerfile: docker/backend.Dockerfile
+    env_file: .env
+    environment:
+      LLM_API_KEY: ${LLM_API_KEY}
+      LLM_BASE_URL: ${LLM_BASE_URL}
+      LLM_MODEL: ${LLM_MODEL}
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: "6333"
+      AMAP_API_KEY: ${AMAP_API_KEY:-}
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: docker/frontend.Dockerfile
+    depends_on:
+      - backend
+    ports:
+      - "8080:80"
+
+  train:
+    build:
+      context: ..
+      dockerfile: docker/train.Dockerfile
+    profiles: ["train"]
+    volumes:
+      - ..:/workspace
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command: python -m train.lora.train_sft
+
+volumes:
+  qdrant_storage:
