@@ -8,3 +8,9 @@ dist-ssr
 *.tsbuildinfo
 vite.config.js
 vite.config.d.ts
+
+# Playwright
+/playwright-report/
+/playwright/.cache/
+/test-results/
+/.playwright-browsers/
