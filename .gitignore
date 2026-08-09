@@ -48,6 +48,10 @@ train/grpo/outputs/*
 train/lora/data/
 train/**/outputs/
 train/eval/outputs/
+train/lora/llamafactory_data/
+
+# 本地模型权重（GB 级，不入库）
+models/
 
 # Qdrant 二进制和存储数据
 tools/qdrant/qdrant.exe
