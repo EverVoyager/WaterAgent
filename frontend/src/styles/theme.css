@@ -1,0 +1,120 @@
+/* ===== 设计变量（Codex 风格 · 浅色为主）===== */
+:root {
+  --bg-base: #ffffff;
+  --bg-subtle: #f7f7f5;
+  --bg-elevated: #ffffff;
+  --text-primary: #1f2328;
+  --text-secondary: #6e7781;
+  --text-tertiary: #9aa0a6;
+  --border-default: #e6e4e0;
+  --border-strong: #d4d2cc;
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-soft: rgba(37, 99, 235, 0.1);
+  --success: #16a34a;
+  --warning: #d97706;
+  --error: #dc2626;
+  --level-1: #dc2626;
+  --level-1-soft: rgba(220, 38, 38, 0.08);
+  --level-2: #ea580c;
+  --level-2-soft: rgba(234, 88, 12, 0.08);
+  --level-3: #d97706;
+  --level-3-soft: rgba(217, 119, 6, 0.1);
+  --level-4: #2563eb;
+  --level-4-soft: rgba(37, 99, 235, 0.08);
+  --sidebar-width: 260px;
+  --sidebar-collapsed-width: 60px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  color-scheme: light;
+}
+
+[data-theme='dark'] {
+  --bg-base: #171716;
+  --bg-subtle: #101010;
+  --bg-elevated: #1f1f1d;
+  --text-primary: #ececec;
+  --text-secondary: #a3a3a3;
+  --text-tertiary: #737373;
+  --border-default: #2c2c28;
+  --border-strong: #3a3a35;
+  --accent: #3b82f6;
+  --accent-hover: #60a5fa;
+  --accent-soft: rgba(59, 130, 246, 0.16);
+  --success: #4ade80;
+  --warning: #fbbf24;
+  --error: #f87171;
+  --level-1: #f87171;
+  --level-1-soft: rgba(248, 113, 113, 0.12);
+  --level-2: #fb923c;
+  --level-2-soft: rgba(251, 146, 60, 0.12);
+  --level-3: #fbbf24;
+  --level-3-soft: rgba(251, 191, 36, 0.14);
+  --level-4: #60a5fa;
+  --level-4-soft: rgba(96, 165, 250, 0.12);
+  color-scheme: dark;
+}
+
+/* ===== 基础 reset（原 assets/styles/main.css 并入）===== */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', Arial, sans-serif;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease;
+}
+
+a {
+  text-decoration: none;
+  color: inherit;
+}
+
+button {
+  font-family: inherit;
+}
+
+::selection {
+  background: var(--accent-soft);
+}
+
+/* 细滚动条 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-tertiary);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 尊重减少动效偏好 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
