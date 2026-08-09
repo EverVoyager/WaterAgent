@@ -24,6 +24,35 @@ os.environ.setdefault("QDRANT_HOST", "127.0.0.1")
 
 import pytest
 
+# 已知联机测试文件（需外部服务：后端 API / LLM / Qdrant / 外部 HTTP）
+# 不在此列表的测试默认视为离线单元测试，无外部服务也能秒过。
+_INTEGRATION_FILES = {
+    "test_hydro_source.py",    # qqjjsj.com 实时水情爬虫
+    "test_round2_fix.py",      # 后端 /api/agent/query 端到端
+    "test_sse_stream.py",      # 后端 SSE 流式 + LLM
+    "test_stage_f_tools.py",   # fetch_hydrology / fetch_weather 外部 API
+}
+
+
+def pytest_collection_modifyitems(config, items):
+    """自动给联机测试文件加 integration 标记。
+
+    无 RUN_INTEGRATION=1 时跳过联机测试，避免无外部服务时测试套件挂死
+    （Qdrant/HTTP 重试无快速失败）。CI 与本地默认只跑离线子集。
+    """
+    skip_marker = pytest.mark.skip(
+        reason="联机测试需 RUN_INTEGRATION=1 才运行；默认跳过避免无外部服务时挂死"
+    )
+    run_integration = os.environ.get("RUN_INTEGRATION") == "1"
+    for item in items:
+        filename = Path(item.fspath).name
+        if filename in _INTEGRATION_FILES:
+            item.add_marker(pytest.mark.integration)
+            if not run_integration:
+                item.add_marker(skip_marker)
+        else:
+            item.add_marker(pytest.mark.unit)
+
 
 @pytest.fixture(scope="session")
 def project_root() -> Path:
