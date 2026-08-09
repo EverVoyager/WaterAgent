@@ -1,4 +1,5 @@
 """LLM 客户端封装：基于 OpenAI 兼容接口。"""
+import re
 from functools import lru_cache
 
 import httpx
@@ -6,6 +7,22 @@ from openai import OpenAI
 from qdrant_client import QdrantClient
 
 from app.core.config import get_settings
+
+
+# Qwen3 思考内容剥离：本地微调模型在 nothink 模板下仍可能输出 <think>...</think>
+# 后端统一剥离，避免思考内容泄漏到前端 / 干扰下游节点解析
+_THINK_PATTERN = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
+
+
+def strip_think(text: str) -> str:
+    """剥离 Qwen3 <think>...</think> 思考内容。
+
+    本地微调的 Qwen3-4B 即使配置 qwen3_nothink 模板，推理时仍可能输出
+    思考块。LlamaFactory API 不会自动剥离，需在客户端层统一处理。
+    """
+    if not text:
+        return text
+    return _THINK_PATTERN.sub("", text).lstrip("\n")
 
 
 # 不同节点的 LLM 调用超时配置（秒）

@@ -8,7 +8,8 @@ nodes → runner → nodes 的循环依赖，故就近放在本模块（synthesi
 """
 import json
 import logging
-from typing import Any, Dict
+import re
+from typing import Any, Dict, Optional
 
 from openai import (
     APIConnectionError,
@@ -20,9 +21,29 @@ from openai import (
 from agent.graph.errors import LLMError, _classify_llm_error
 from agent.graph.state import AgentState
 from agent.prompts import SYNTHESIZER_PROMPT
-from app.core.llm import LLM_TIMEOUTS, get_llm_client, get_llm_config
+from app.core.llm import LLM_TIMEOUTS, get_llm_client, get_llm_config, strip_think
 
 logger = logging.getLogger(__name__)
+
+# Structured Outputs JSON Schema（强制 LLM 返回合法 JSON）
+_SYNTH_RESPONSE_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "synth_result",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "warning_level": {"type": "string", "enum": ["I", "II", "III", "IV", ""]},
+                "reasoning": {"type": "string"},
+                "actions": {"type": "array", "items": {"type": "string"}},
+                "answer": {"type": "string"},
+            },
+            "required": ["warning_level", "reasoning", "actions", "answer"],
+            "additionalProperties": False,
+        },
+    },
+}
 
 
 def synthesizer_node(state: AgentState) -> Dict[str, Any]:
@@ -42,6 +63,96 @@ def synthesizer_node(state: AgentState) -> Dict[str, Any]:
         "actions": synth.get("actions", []),
         "final_answer": synth.get("answer", ""),
     }
+
+
+def _call_synth_with_fallback(client, model: str, messages: list):
+    """分级降级调用 LLM：json_schema strict → json_object → 无 response_format。
+
+    DashScope 对 json_schema strict 支持不确定，报 400 则逐级降级。
+    LLM 调用级异常（timeout/rate_limit/connection）直接抛 LLMError。
+    """
+    # 尝试列表：从最强约束到最弱
+    formats = [
+        ("json_schema", _SYNTH_RESPONSE_SCHEMA),
+        ("json_object", {"type": "json_object"}),
+        ("none", None),
+    ]
+    last_exc = None
+    for label, fmt in formats:
+        try:
+            kwargs = {"model": model, "messages": messages, "temperature": 0.3, "max_tokens": 1500}
+            if fmt is not None:
+                kwargs["response_format"] = fmt
+            resp = client.chat.completions.create(**kwargs)
+            logger.info("[synthesizer] LLM 调用成功（response_format=%s）", label)
+            return resp
+        except (APITimeoutError, RateLimitError, APIConnectionError) as e:
+            # 这类异常不重试，直接抛
+            raise _classify_llm_error(e) from e
+        except APIError as e:
+            # 400 BadRequest 通常是 response_format 不支持，降级重试
+            if getattr(e, "status_code", None) == 400 and label != "none":
+                logger.warning("[synthesizer] response_format=%s 不支持，降级重试：%s", label, str(e)[:120])
+                last_exc = e
+                continue
+            # 其他 APIError 直接抛
+            raise _classify_llm_error(e) from e
+        except Exception as e:
+            logger.exception("[synthesizer] LLM 未知异常")
+            raise _classify_llm_error(e) from e
+    # 所有格式都失败（理论上不会走到，none 兜底）
+    raise _classify_llm_error(last_exc) if last_exc else LLMError("api_error", "LLM 调用失败")
+
+
+def _parse_synthesizer_json(content: str) -> Optional[Dict[str, Any]]:
+    """解析 synthesizer LLM 返回的 JSON，多策略容错。
+
+    返回 None 表示无法解析。
+    """
+    if not content:
+        return None
+    # 策略 1：直接解析
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        pass
+    # 策略 2：去除 ```json ``` 包裹
+    text = content
+    if text.startswith("```"):
+        parts = text.split("```")
+        if len(parts) >= 2:
+            text = parts[1]
+            if text.startswith("json"):
+                text = text[4:]
+            text = text.strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    # 策略 3：提取第一个完整 {...} 块（大括号配对）
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                block = text[start:i + 1]
+                try:
+                    return json.loads(block)
+                except json.JSONDecodeError:
+                    # 策略 4：修复常见问题（单引号→双引号、去尾随逗号）
+                    fixed = block
+                    fixed = fixed.replace("'", '"')
+                    fixed = re.sub(r",\s*([}\]])", r"\1", fixed)  # 去尾随逗号
+                    try:
+                        return json.loads(fixed)
+                    except json.JSONDecodeError:
+                        return None
+    return None
 
 
 def _synth_via_llm(query: str, tool_results: Dict[str, Any]) -> Dict[str, Any]:
@@ -73,41 +184,24 @@ def _synth_via_llm(query: str, tool_results: Dict[str, Any]) -> Dict[str, Any]:
             + preferences
         )
 
-    try:
-        resp = client.chat.completions.create(
-            model=settings["model"],
-            messages=[
-                {"role": "system", "content": system_content},
-                {"role": "user", "content": (
-                    f"用户问题：{query}\n\n"
-                    f"工具返回结果：\n{tool_results_text}"
-                )},
-            ],
-            temperature=0.3,
-            max_tokens=1500,
+    # 分级降级：json_schema strict → json_object → 无 response_format
+    messages = [
+        {"role": "system", "content": system_content},
+        {"role": "user", "content": (
+            f"用户问题：{query}\n\n"
+            f"工具返回结果：\n{tool_results_text}"
+        )},
+    ]
+    resp = _call_synth_with_fallback(client, settings["model"], messages)
+    content = strip_think((resp.choices[0].message.content or "").strip())
+    result = _parse_synthesizer_json(content)
+    if result is None:
+        logger.error("[synthesizer] LLM 返回非 JSON: %s", content[:300])
+        raise LLMError(
+            "format_error",
+            f"LLM 综合研判返回格式异常（非 JSON），原始内容前 200 字：{content[:200]}",
+            status_code=502,
         )
-    except (APITimeoutError, RateLimitError, APIConnectionError, APIError) as e:
-        logger.exception("[synthesizer] LLM 综合研判调用失败 (%s)", type(e).__name__)
-        raise _classify_llm_error(e) from e
-    except Exception as e:
-        logger.exception("[synthesizer] LLM 未知异常")
-        raise _classify_llm_error(e) from e
-
-    content = (resp.choices[0].message.content or "").strip()
-    # 兼容 ```json ``` 包裹
-    if content.startswith("```"):
-        content = content.split("```")[1]
-        if content.startswith("json"):
-            content = content[4:]
-        content = content.strip()
-        if content.endswith("```"):
-            content = content[:-3].strip()
-
-    try:
-        result = json.loads(content)
-    except json.JSONDecodeError as e:
-        logger.error("[synthesizer] LLM 返回非 JSON: %s", content[:200])
-        raise LLMError("format_error", f"LLM 综合研判返回格式异常（非 JSON）：{e}", status_code=502) from e
 
     # 规范化等级字段
     level = result.get("warning_level", "")

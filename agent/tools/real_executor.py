@@ -155,7 +155,7 @@ def generate_plan_real(params: GeneratePlanParams) -> Dict[str, Any]:
     import json
     import logging
     from agent.rag import is_index_ready, search_regulations
-    from app.core.llm import LLM_TIMEOUTS, get_llm_client, get_llm_config
+    from app.core.llm import LLM_TIMEOUTS, get_llm_client, get_llm_config, strip_think
     from agent.graph.workflow import LLMError, _classify_llm_error
     from openai import (
         APIConnectionError, APITimeoutError, APIError, RateLimitError,
@@ -231,7 +231,7 @@ def generate_plan_real(params: GeneratePlanParams) -> Dict[str, Any]:
         logger.exception("[generate_plan_real] LLM 未知异常")
         raise _classify_llm_error(e) from e
 
-    content = (resp.choices[0].message.content or "").strip()
+    content = strip_think((resp.choices[0].message.content or "").strip())
     # 兼容 ```json ``` 包裹
     if content.startswith("```"):
         content = content.split("```")[1]

@@ -32,7 +32,7 @@ def _embed_batch(texts: List[str]) -> List[List[float]]:
     settings = get_llm_config()
     client = get_llm_client()
     resp = client.embeddings.create(
-        model=settings.get("embedding_model") or "text-embedding-v3",
+        model=settings.get("embedding_model"),
         input=texts,
     )
     # DashScope 返回的 data 可能乱序，按 index 排序

@@ -16,7 +16,7 @@ from openai import (
 
 from agent.graph.errors import LLMError, _classify_llm_error
 from agent.tracing import trace_llm_call
-from app.core.llm import LLM_TIMEOUTS, get_llm_client, get_llm_config
+from app.core.llm import LLM_TIMEOUTS, get_llm_client, get_llm_config, strip_think
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +51,7 @@ def _call_llm_json(system: str, user: str, timeout_key: str = "default") -> Any:
             raise _classify_llm_error(e) from e
 
         # 记录到 LangFuse
-        content = (resp.choices[0].message.content or "").strip()
+        content = strip_think((resp.choices[0].message.content or "").strip())
         gen.set_output({"content": content[:1000]})
         gen.set_usage(getattr(resp, "usage", None))
 
@@ -102,15 +102,52 @@ def _stream_llm(system: str, user: str, temperature: float = 0.7, max_tokens: in
             raise _classify_llm_error(e) from e
 
         # 累积流式输出，结束后记录到 LangFuse
+        # Qwen3 思考内容剥离：流式需缓冲检测 <think>...</think> 块
         collected: list[str] = []
+        buffer = ""
+        in_think = False
         for chunk in stream:
             if not chunk.choices:
                 continue
             delta = chunk.choices[0].delta
             content = getattr(delta, "content", None)
-            if content:
-                collected.append(content)
-                yield content
+            if not content:
+                continue
+            collected.append(content)
+            buffer += content
+            # 状态机剥离 <think>...</think>
+            output = ""
+            while buffer:
+                if in_think:
+                    end = buffer.find("</think>")
+                    if end == -1:
+                        # think 块未结束，继续缓冲
+                        break
+                    # 找到结束标签，跳过 think 内容
+                    buffer = buffer[end + len("</think>"):]
+                    # 跳过后缀空白
+                    while buffer and buffer[0] in " \n\t":
+                        buffer = buffer[1:]
+                    in_think = False
+                else:
+                    start = buffer.find("<think>")
+                    if start == -1:
+                        # 没有 think 标签，但要保留可能的不完整 "<think"
+                        # 检查 buffer 末尾是否是 "<think" 的前缀
+                        partial = 0
+                        for plen in range(min(len(buffer), len("<think>")), 0, -1):
+                            if buffer.endswith("<think>"[:plen]):
+                                partial = plen
+                                break
+                        output += buffer[:len(buffer) - partial]
+                        buffer = buffer[len(buffer) - partial:]
+                        break
+                    # 找到 think 开始标签
+                    output += buffer[:start]
+                    buffer = buffer[start + len("<think>"):]
+                    in_think = True
+            if output:
+                yield output
 
         # 流结束后设置 output（截断到 1000 字符避免 trace 过大）
         full_output = "".join(collected)

@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     LLM_API_KEY: str = "sk-placeholder"
     LLM_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     LLM_MODEL: str = "qwen-plus"
+    # 评判模型（双模型蒸馏的评判角色，用更强模型做语义质量打分）
+    LLM_JUDGE_MODEL: str = "qwen-max"
     LLM_TEMPERATURE: float = 0.3
     LLM_MAX_TOKENS: int = 2048
     # 单次会话最大工具调用轮次（防止死循环）

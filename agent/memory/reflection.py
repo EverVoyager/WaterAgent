@@ -22,11 +22,12 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
 from agent.memory.memory_store import (
+    MemoryStore,
     MemoryType,
     get_memory_store,
     is_memory_enabled,
 )
-from app.core.llm import get_llm_client, get_llm_config
+from app.core.llm import get_llm_client, get_llm_config, strip_think
 
 logger = logging.getLogger(__name__)
 
@@ -284,7 +285,7 @@ def _llm_compact_memories(
         logger.warning("[compact] LLM 调用失败：%s", e)
         return None
 
-    content = (resp.choices[0].message.content or "").strip()
+    content = strip_think((resp.choices[0].message.content or "").strip())
     if content.startswith("```"):
         content = content.split("```")[1]
         if content.startswith("json"):
@@ -304,7 +305,7 @@ def _llm_compact_memories(
 
 
 def _trigger_compact_for_types(
-    store: "MemoryStore",
+    store: MemoryStore,
     memories_from_reflection: List[Dict[str, Any]],
 ) -> None:
     """对本次反思涉及的记忆类型触发压缩。"""
@@ -389,8 +390,7 @@ def _generate_reflection(reflection_input: Dict[str, Any]) -> Optional[Dict[str,
         logger.warning("[reflection] LLM 调用失败：%s", e)
         return None
 
-    content = (resp.choices[0].message.content or "").strip()
-    # 兼容 ```json ``` 包裹
+    content = strip_think((resp.choices[0].message.content or "").strip())
     if content.startswith("```"):
         content = content.split("```")[1]
         if content.startswith("json"):

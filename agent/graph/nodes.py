@@ -21,7 +21,7 @@ from agent.graph.state import AgentState
 from agent.graph.synthesizer_node import _summarize_results
 from agent.prompts import DIRECT_CHAT_PROMPT
 from agent.router import detect_intent
-from app.core.llm import LLM_TIMEOUTS, get_llm_client, get_llm_config
+from app.core.llm import LLM_TIMEOUTS, get_llm_client, get_llm_config, strip_think
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +79,7 @@ def direct_chat_node(state: AgentState) -> Dict[str, Any]:
         logger.exception("[direct_chat] LLM 未知异常")
         raise _classify_llm_error(e) from e
 
-    answer = (resp.choices[0].message.content or "").strip()
+    answer = strip_think((resp.choices[0].message.content or "").strip())
     logger.info("[direct_chat] answer=%s", answer[:80])
     return {
         "final_answer": answer,
@@ -119,18 +119,53 @@ def _direct_chat_stream(query: str, history: List[Dict[str, Any]]):
         logger.exception("[direct_chat_stream] LLM 未知异常")
         raise _classify_llm_error(e) from e
 
-    full_answer = []
+    # Qwen3 思考内容剥离：流式需缓冲检测 <think>...</think> 块
+    # 与 llm_helpers._stream_llm 保持一致的状态机逻辑
+    filtered_answer = []
+    buffer = ""
+    in_think = False
     for chunk in stream:
         if not chunk.choices:
             continue
         delta = chunk.choices[0].delta
         content = getattr(delta, "content", None)
-        if content:
-            full_answer.append(content)
-            yield {"type": "answer_delta", "content": content}
+        if not content:
+            continue
+        buffer += content
+        output = ""
+        while buffer:
+            if in_think:
+                end = buffer.find("</think>")
+                if end == -1:
+                    # think 块未结束，继续缓冲
+                    break
+                # 跳过 think 内容及结束标签
+                buffer = buffer[end + len("</think>"):]
+                while buffer and buffer[0] in " \n\t":
+                    buffer = buffer[1:]
+                in_think = False
+            else:
+                start = buffer.find("<think>")
+                if start == -1:
+                    # 没有 think 标签，但保留末尾可能是 "<think" 前缀的部分
+                    partial = 0
+                    for plen in range(min(len(buffer), len("<think>")), 0, -1):
+                        if buffer.endswith("<think>"[:plen]):
+                            partial = plen
+                            break
+                    output += buffer[:len(buffer) - partial]
+                    buffer = buffer[len(buffer) - partial:]
+                    break
+                output += buffer[:start]
+                buffer = buffer[start + len("<think>"):]
+                in_think = True
+        if output:
+            filtered_answer.append(output)
+            yield {"type": "answer_delta", "content": output}
 
-    # 推送完整 answer 供 done 事件使用
-    yield {"type": "synth_answer_full", "content": "".join(full_answer)}
+    # 流结束时若 think 块仍未闭合（异常中断），丢弃残留 buffer
+    # 推送完整 answer 供 done 事件使用（已过滤 think）
+    yield {"type": "synth_answer_full", "content": "".join(filtered_answer)}
 
 
 def planner_node(state: AgentState) -> Dict[str, Any]:
