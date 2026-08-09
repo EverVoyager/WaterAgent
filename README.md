@@ -149,6 +149,59 @@ python -m ruff check agent/ backend/app/
 4. GRPO：`python -m train.grpo.train_grpo`，再次 merge
 5. 评估：`python -m train.eval.run_eval --models <base> sft-merged grpo-merged --n 300`
 
+## 本地微调模型部署（可选）
+
+完成 SFT 训练并合并 LoRA adapter 后（合并产物默认在 `models/wateragents-qwen3-4b-v1/`），可启动本地 LLM API 服务替代 DashScope。推理配置见 [train/lora/configs/wateragents_inference.yaml](train/lora/configs/wateragents_inference.yaml)（方式 A：合并后推理，无 quantization_bit，template=qwen3_nothink）。
+
+### 启动顺序（3 个终端，严格按序）
+
+**终端 1 — 启动 LlamaFactory API 服务（端口 8001）**
+
+```powershell
+# 设置 HF 缓存路径，避免重复下载模型
+$env:HF_HOME = "D:\hf_cache"
+# 必须指定 API_PORT=8001，否则 LlamaFactory 默认监听 8000 会与后端冲突
+$env:API_PORT = "8001"
+cd d:\AgentProject\WaterAgents
+llamafactory-cli api train/lora/configs/wateragents_inference.yaml
+```
+
+等待日志出现 `Uvicorn running on http://0.0.0.0:8001` 且模型加载完成（首次加载约 1-2 分钟），再启动后端。
+
+> 若启动报 `[Errno 10048] bind on address ('0.0.0.0', 8000)`，说明 LlamaFactory 仍在用默认 8000 端口——确认 `$env:API_PORT = "8001"` 已在同一终端会话中执行；同时检查是否有遗留 python 进程占用 8000：`netstat -ano | findstr :8000`，按 PID 执行 `taskkill /PID <PID> /F` 释放端口。
+
+**终端 2 — 启动后端（端口 8000）**
+
+先确认 `backend/.env` 已切换到本地模型：
+
+```bash
+LLM_API_KEY=local                          # 本地服务不校验 key，填任意非空值
+LLM_BASE_URL=http://localhost:8001/v1      # 指向 LlamaFactory API
+LLM_MODEL=wateragents-qwen3-4b-v1          # 与推理配置中的模型名一致
+```
+
+再启动后端（必须在 backend 目录下执行，否则会报 `No module named 'app'`）：
+
+```bash
+cd d:\AgentProject\WaterAgents\backend
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+# 或直接运行 backend/run.bat
+```
+
+**终端 3 — 启动前端（端口 5173）**
+
+```bash
+cd d:\AgentProject\WaterAgents\frontend
+npm run dev
+# 打开 http://localhost:5173
+```
+
+### 验证本地模型部署
+
+在前端输入"龙门站现在水情怎么样"，Agent 应正确调用 `get_hydrology` 工具并返回研判结果。若思考内容 `<think>...</think>` 泄漏到前端，确认后端已应用 `strip_think` 处理（见 [backend/app/core/llm.py](backend/app/core/llm.py)）。
+
+> 注：本地微调模型（Qwen3-4B QLoRA）的能力弱于 DashScope qwen-plus，复杂多工具规划场景可能不如在线模型稳定。
+
 ## Docker 部署
 
 见 docker/.env.example 配置密钥后：
@@ -183,6 +236,6 @@ python -m ruff check agent/ backend/app/
 
 - **后端**：FastAPI、LangGraph、Pydantic、Qdrant、structlog、slowapi
 - **LLM**：OpenAI 兼容接口（DashScope qwen-plus + text-embedding-v3）
-- **前端**：Vue 3、TypeScript、Element Plus、Vite
+- **前端**：Vue 3、TypeScript、Vite（Codex 风格手写 UI，Element Plus 仅用于全局提示）
 - **测试**：pytest、pytest-cov、ruff
 - **CI**：GitHub Actions（后端 pytest + 前端 vue-tsc/build）
