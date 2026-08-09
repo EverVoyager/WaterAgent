@@ -5,10 +5,8 @@ from train.rewards.composite import compute_reward
 
 
 def _scn(level="II"):
-    # 必须选 multi_tool 场景：其 reference_tools 覆盖三工具，
-    # 与 _good_completion 的调用集合一致
     return next(s for s in generate_scenarios(n=50, seed=21)
-                if s.expected_level == level and s.query_type == "multi_tool")
+                if s.expected_level == level)
 
 
 def _good_completion(scn):

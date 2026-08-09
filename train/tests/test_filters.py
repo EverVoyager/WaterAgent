@@ -1,4 +1,4 @@
-"""三道过滤：F1 参数合法 / F2 序列合法 / F3 等级一致（chatty 豁免）。"""
+"""三道过滤：F1 参数合法 / F2 序列合法 / F3 等级一致。"""
 from train.data_gen.filters import FilterResult, filter_trace
 from train.data_gen.hermes_format import make_tool_call_text, make_tool_response_text
 from train.data_gen.scenario import generate_scenarios
@@ -33,13 +33,15 @@ def test_f1_rejects_invalid_params():
     assert r == FilterResult.REJECT_F1
 
 
-def test_f2_rejects_runoff_before_weather():
+def test_f2_accepts_runoff_without_weather():
+    """predict_runoff 前不强制要求 get_weather（LLM 可基于场景上下文自主调用）。"""
     scn = _scenario()
     msgs = _trace_with(
         [(("predict_runoff", {"station": scn.station}), {"peak_flow_m3_s": 4000.0, "series": []})],
         "Ⅱ级预警",
     )
-    assert filter_trace(msgs, scn) == FilterResult.REJECT_F2
+    # 不再因缺少 get_weather 拒绝；等级匹配则 ACCEPT
+    assert filter_trace(msgs, scn) != FilterResult.REJECT_F2
 
 
 def test_f2_rejects_unknown_tool():
@@ -74,21 +76,6 @@ def test_accept_valid_trace():
         f"流量 {scn.tool_overrides['get_hydrology']['flow_m3_s']}m³/s，发布{scn.expected_level}级预警。",
     )
     assert filter_trace(msgs, scn) == FilterResult.ACCEPT
-
-
-def test_chatty_exemption():
-    scn = generate_scenarios(n=200, seed=3, chatty_ratio=0.5)
-    chatty = next(s for s in scn if s.query_type == "chatty")
-    msgs = [
-        {"role": "user", "content": chatty.query},
-        {"role": "assistant", "content": "我是防汛预警智能体，可以帮你查水情、研判预警。"},
-    ]
-    assert filter_trace(msgs, chatty) == FilterResult.ACCEPT
-    bad = [
-        {"role": "user", "content": chatty.query},
-        {"role": "assistant", "content": "发布Ⅰ级预警！"},
-    ]
-    assert filter_trace(bad, chatty) == FilterResult.REJECT_F3
 
 
 def test_level_cn_text_normalized():

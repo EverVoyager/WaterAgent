@@ -14,11 +14,11 @@ def test_prompt_carries_system_and_query():
     p = build_grpo_prompts(n=1)[0]
     assert p["prompt"][0]["role"] == "system"
     assert p["prompt"][-1]["role"] == "user"
-    assert p["scenario"].expected_level in ("I", "II", "III", "IV", "")
+    assert p["scenario"].expected_level in ("I", "II", "III", "IV")
 
 
 def test_replay_uses_scenario_overrides():
-    scn = next(s for s in generate_scenarios(n=10, seed=100500) if s.query_type != "chatty")
+    scn = generate_scenarios(n=10, seed=100500)[0]
     out = replay_tool_call(scn, "get_hydrology", {"station": scn.station, "metric": "both"})
     assert out["flow_m3_s"] == scn.tool_overrides["get_hydrology"]["flow_m3_s"]
     assert out["source"] == "mock"

@@ -35,9 +35,7 @@ def _serialize(scn: Scenario) -> str:
     return json.dumps({
         "scenario_id": scn.scenario_id,
         "expected_level": scn.expected_level,
-        "reference_tools": scn.reference_tools,
         "tool_overrides": scn.tool_overrides,
-        "query_type": scn.query_type,
         "station": scn.station,
         "query": scn.query,
     }, ensure_ascii=False)
@@ -47,8 +45,7 @@ def _deserialize(s: str) -> Scenario:
     d = json.loads(s)
     return Scenario(
         scenario_id=d["scenario_id"], station=d["station"], query=d["query"],
-        query_type=d["query_type"], expected_level=d["expected_level"],
-        tool_overrides=d["tool_overrides"], reference_tools=d["reference_tools"],
+        expected_level=d["expected_level"], tool_overrides=d["tool_overrides"],
     )
 
 

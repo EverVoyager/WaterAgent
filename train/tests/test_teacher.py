@@ -7,8 +7,8 @@ from train.data_gen.scenario import generate_scenarios
 from train.data_gen.teacher import synthesize_one, synthesize_dataset
 
 
-def _scenario(qtype="multi_tool"):
-    return next(s for s in generate_scenarios(n=20, seed=7) if s.query_type == qtype)
+def _scenario():
+    return generate_scenarios(n=20, seed=7)[0]
 
 
 def _fc_response(tool_name: str, arguments: dict, call_id: str = "call_1"):

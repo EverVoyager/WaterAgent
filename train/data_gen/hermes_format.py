@@ -86,5 +86,5 @@ def parse_final_answer(messages: list[dict]) -> Optional[str]:
 
 
 def round_trip_ok(messages: list[dict]) -> bool:
-    """parse_trace 成功且最终段可提取等级（chatty 样本除外，调用方自行豁免）。"""
+    """parse_trace 成功即通过。"""
     return parse_trace(messages) is not None

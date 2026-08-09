@@ -25,7 +25,7 @@ def _truth_level(scn: Scenario) -> str:
         if scn.tool_overrides.get(tool_name):
             tool_results[key] = scn.tool_overrides[tool_name]
     if not tool_results:
-        return scn.expected_level  # chatty：无工具数据，真值即空串
+        return scn.expected_level  # plan_only 等无水文数据场景，直接用场景真值
     level, _ = compute_warning_level(tool_results)
     return level
 
@@ -36,7 +36,7 @@ def compute_reward(completion: str, scn: Scenario, rag_hits: list) -> tuple:
         return 0.0, {}
     parts = {
         "r1": r1_score(completion, _truth_level(scn)),
-        "r2": r2_score(completion, scn.reference_tools),
+        "r2": r2_score(completion),
         "r3": r3_score(completion, rag_hits),
     }
     return sum(parts.values()), parts

@@ -3,6 +3,7 @@
 过滤权威：等级真值由 agent.graph.synthesizer.compute_warning_level 对回放
 工具结果重算得出，与线上规则引擎单一同源。
 """
+import json
 from enum import Enum
 
 from agent.graph.synthesizer import compute_warning_level
@@ -32,13 +33,18 @@ def _f1_params_valid(tool_calls: list) -> bool:
 
 
 def _f2_sequence_valid(tool_calls: list) -> bool:
-    """序列合法性：工具已知 / 无重复 / predict_runoff 前有 weather / generate_plan 在末尾。"""
+    """序列合法性：工具已知 / 无完全重复调用 / generate_plan 在末尾。
+
+    注：
+    - 允许同工具不同参数的调用（如查两个不同站点）
+    - 不再强制要求 predict_runoff 前必须有 get_weather
+    """
     names = [c["name"] for c in tool_calls]
     if any(n not in TOOL_PARAM_MODELS for n in names):
         return False
-    if len(names) != len(set(names)):  # 重复调用
-        return False
-    if "predict_runoff" in names and "get_weather" not in names[: names.index("predict_runoff")]:
+    # 按 name+arguments 元组去重（允许同工具不同参数）
+    sigs = [(c["name"], json.dumps(c["arguments"], sort_keys=True)) for c in tool_calls]
+    if len(sigs) != len(set(sigs)):
         return False
     if "generate_plan" in names and names.index("generate_plan") != len(names) - 1:
         return False
@@ -47,13 +53,6 @@ def _f2_sequence_valid(tool_calls: list) -> bool:
 
 def filter_trace(messages: list, scenario: Scenario) -> FilterResult:
     """对单条轨迹执行三道过滤。"""
-    if scenario.query_type == "chatty":
-        trace = parse_trace(messages)
-        if trace is None or trace["tool_calls"]:
-            return FilterResult.REJECT_F2
-        # 闲聊样本要求最终段不含任何等级字样
-        return FilterResult.ACCEPT if parse_final_answer(messages) is None else FilterResult.REJECT_F3
-
     trace = parse_trace(messages)
     if trace is None:
         return FilterResult.REJECT_F1

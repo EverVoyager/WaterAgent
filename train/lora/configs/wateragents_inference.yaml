@@ -1,0 +1,11 @@
+### model
+model_name_or_path: D:/AgentProject/WaterAgents/models/wateragents-qwen3-4b-v1
+template: qwen3_nothink
+trust_remote_code: true
+
+### inference
+infer_backend: huggingface
+cutoff_len: 1024
+max_new_tokens: 512
+temperature: 0.7
+top_p: 0.9

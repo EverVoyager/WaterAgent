@@ -99,13 +99,17 @@ def load_done_ids(path: Path) -> set:
 
 def synthesize_dataset(client, model: str, scenarios: list, out_path: Path, rpm: int = 30) -> int:
     """批量合成 + 追加写盘 + 断点续传。返回本次新写入条数。"""
+    from tqdm import tqdm
+
     done = load_done_ids(out_path)
+    pending = [s for s in scenarios if s.scenario_id not in done]
+    if not pending:
+        return 0
     interval = 60.0 / max(rpm, 1)
     written = 0
     with out_path.open("a", encoding="utf-8") as f:
-        for scn in scenarios:
-            if scn.scenario_id in done:
-                continue
+        for scn in tqdm(pending, desc="教师合成", unit="条",
+                        bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"):
             t0 = time.time()
             try:
                 trace = synthesize_one(client, model, scn)
@@ -116,7 +120,6 @@ def synthesize_dataset(client, model: str, scenarios: list, out_path: Path, rpm:
                 f.write(json.dumps({
                     "scenario_id": scn.scenario_id,
                     "level": scn.expected_level,
-                    "query_type": scn.query_type,
                     "messages": trace,
                 }, ensure_ascii=False) + "\n")
                 f.flush()

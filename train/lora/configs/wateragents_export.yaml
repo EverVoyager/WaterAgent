@@ -1,0 +1,10 @@
+### model
+model_name_or_path: D:/hf_cache/models--Qwen--Qwen3-4B/snapshots/1cfa9a7208912126459214e8b04321603b3df60c
+adapter_name_or_path: saves/wateragents/qlora/sft
+template: qwen3_nothink
+finetuning_type: lora
+trust_remote_code: true
+export_dir: D:/AgentProject/WaterAgents/models/wateragents-qwen3-4b-v1
+export_size: 2
+export_device: cpu
+export_legacy_format: false
