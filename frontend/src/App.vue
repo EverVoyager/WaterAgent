@@ -4,11 +4,13 @@
     <div class="main-area">
       <router-view />
     </div>
+    <ToastContainer />
   </div>
 </template>
 
 <script setup lang="ts">
 import AppSidebar from '@/components/AppSidebar.vue'
+import ToastContainer from '@/components/ToastContainer.vue'
 import { useTheme } from '@/composables/useTheme'
 
 // 确保主题在应用启动时初始化

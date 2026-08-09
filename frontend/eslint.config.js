@@ -12,6 +12,9 @@ export default [
       'coverage/',
       'vite.config.js',
       'vite.config.d.ts',
+      'e2e/',
+      'playwright.config.ts',
+      '.playwright-browsers/',
     ],
   },
 

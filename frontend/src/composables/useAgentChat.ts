@@ -6,7 +6,7 @@
  * 模块级单例：多组件（AgentView / ChatInput / ...）共享同一状态。
  */
 import { ref, type ComputedRef, type Ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { useToast } from '@/composables/useToast'
 import {
   queryAgentStream,
   type AgentQueryResponse,
@@ -67,6 +67,7 @@ export function stepName(step: string): string {
 // ====== 模块级单例状态 ======
 
 const { activeMessages, ensureActiveSession, persistActiveSession } = useChatSessions()
+const toast = useToast()
 
 const inputText = ref('')
 const loading = ref(false)
@@ -111,7 +112,7 @@ async function sendQuery() {
       }
       loading.value = false
       persistActiveSession()
-      ElMessage.error(err.message)
+      toast.error(err.message)
     },
   )
 }
@@ -205,7 +206,7 @@ function handleStreamEvent(event: AgentStreamEvent, aiMsgIdx: number) {
       aiMsg.content = `运行失败：${event.message}`
       loading.value = false
       persistActiveSession()
-      ElMessage.error(event.message || 'Agent 运行失败')
+      toast.error(event.message || 'Agent 运行失败')
       break
   }
 }
