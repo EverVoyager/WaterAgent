@@ -15,6 +15,6 @@
         → real_executor.query_gis_terrain_real 调用
 """
 from agent.gis.dem_loader import DEMDataset, load_study_dem
-from agent.gis.terrain_analyzer import TerrainAnalyzer, TerrainAnalysisResult
+from agent.gis.terrain_analyzer import TerrainAnalysisResult, TerrainAnalyzer
 
 __all__ = ["DEMDataset", "load_study_dem", "TerrainAnalyzer", "TerrainAnalysisResult"]

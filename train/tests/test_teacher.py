@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from train.data_gen.scenario import generate_scenarios
-from train.data_gen.teacher import synthesize_one, synthesize_dataset
+from train.data_gen.teacher import synthesize_dataset, synthesize_one
 
 
 def _scenario():

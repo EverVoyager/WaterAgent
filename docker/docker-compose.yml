@@ -11,6 +11,22 @@ services:
       timeout: 3s
       retries: 10
 
+  # 会话持久化（sessions）+ 自进化记忆（memories/skills）依赖 MySQL，
+  # 缺失时对应 API 硬失败。密码与 docker/.env 的 MYSQL_PASSWORD 对齐。
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD:-water_agent_dev}
+      MYSQL_DATABASE: water_agent
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - mysql_storage:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
   vllm:
     image: vllm/vllm-openai:v0.7.3
     profiles: ["local-llm"]   # 用本地微调模型时启用：docker compose --profile local-llm up
@@ -50,8 +66,15 @@ services:
       QDRANT_HOST: qdrant
       QDRANT_PORT: "6333"
       AMAP_API_KEY: ${AMAP_API_KEY:-}
+      MYSQL_HOST: ${MYSQL_HOST:-mysql}
+      MYSQL_PORT: "3306"
+      MYSQL_USER: ${MYSQL_USER:-root}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-water_agent_dev}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-water_agent}
     depends_on:
       qdrant:
+        condition: service_healthy
+      mysql:
         condition: service_healthy
     ports:
       - "8000:8000"
@@ -83,3 +106,4 @@ services:
 
 volumes:
   qdrant_storage:
+  mysql_storage:

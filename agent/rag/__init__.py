@@ -7,12 +7,11 @@ from agent.rag.document_loader import (
     load_regulation_files,
     split_markdown_to_chunks,
 )
-from agent.rag.embedding import embed_texts, embed_query
+from agent.rag.embedding import embed_query, embed_texts
 from agent.rag.vector_store import (
-    FAISS_INDEX_DIR,
     build_and_persist_index,
-    load_vector_store,
     is_index_ready,
+    load_vector_store,
     search_regulations,
 )
 
@@ -22,7 +21,6 @@ __all__ = [
     "split_markdown_to_chunks",
     "embed_texts",
     "embed_query",
-    "FAISS_INDEX_DIR",
     "build_and_persist_index",
     "load_vector_store",
     "is_index_ready",

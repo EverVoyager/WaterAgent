@@ -10,6 +10,10 @@ COPY agent/ ./agent/
 COPY backend/ ./backend/
 COPY data/raw/regulations/ ./data/raw/regulations/
 
+# 非 root 用户运行，降低 RCE 后的逃逸风险
+RUN useradd -m -u 1001 appuser && chown -R appuser:appuser /app
+USER appuser
+
 EXPOSE 8000
 HEALTHCHECK --interval=15s --timeout=5s --retries=5 \
   CMD python -c "import urllib.request;urllib.request.urlopen('http://localhost:8000/api/health')"

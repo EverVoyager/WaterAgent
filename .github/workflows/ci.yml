@@ -10,9 +10,23 @@ jobs:
   # ====== 后端测试 + lint ======
   backend:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: backend
+
+    # sessions/memories/skills API 依赖 MySQL：CI 起真实服务实跑相关测试，
+    # 本地无 MySQL 时对应用例自动 skip（skipif on is_skill_store_enabled）
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: ci_mysql_password
+          MYSQL_DATABASE: water_agent
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=20
+
     steps:
       - uses: actions/checkout@v4
 
@@ -24,6 +38,7 @@ jobs:
           cache-dependency-path: backend/requirements.txt
 
       - name: Install dependencies
+        working-directory: backend
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
@@ -31,21 +46,26 @@ jobs:
       - name: Lint with ruff
         run: ruff check . --output-format=github
 
-      - name: Test with pytest
+      - name: Test with pytest (backend/tests + train/tests)
         env:
-          PYTHONPATH: ..
+          PYTHONPATH: .
           LLM_API_KEY: sk-test-placeholder
           AMAP_API_KEY: ""
           QDRANT_HOST: "127.0.0.1"
           QDRANT_PORT: "6333"
+          MYSQL_HOST: "127.0.0.1"
+          MYSQL_PORT: "3306"
+          MYSQL_USER: root
+          MYSQL_PASSWORD: ci_mysql_password
+          MYSQL_DATABASE: water_agent
         run: |
-          pytest tests/ --cov=agent --cov=app --cov-report=xml --cov-report=term -v
+          pytest backend/tests train/tests --cov=agent --cov=app --cov-report=xml --cov-report=term -v
 
       - name: Upload coverage
         uses: codecov/codecov-action@v4
         if: always()
         with:
-          file: backend/coverage.xml
+          file: coverage.xml
           fail_ci_if_error: false
 
   # ====== 前端类型检查 + 构建 ======

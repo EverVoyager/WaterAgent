@@ -3,13 +3,15 @@
 用 qwen-plus 对种子查询改写扩展，生成大规模多样查询。
 去重策略：字符 2-gram Jaccard 相似度 > 0.7 剔除。
 """
-import json
 import logging
 import random
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from pathlib import Path
 
-from train.data_gen.seed_queries import SeedQuery, get_seeds, get_knowledge_seeds
+from openai import OpenAI
+
+from train.data_gen.seed_queries import SeedQuery, get_knowledge_seeds, get_seeds
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +92,7 @@ def _deduplicate(queries: list[str], threshold: float = 0.7) -> list[str]:
     return kept
 
 
-def expand_one(client, model: str, seed: SeedQuery, n_variants: int = 10,
+def expand_one(client: OpenAI, model: str, seed: SeedQuery, n_variants: int = 10,
                temperature: float = 0.8) -> list[str]:
     """对单个种子扩张 n_variants 个变体。返回去重后的变体列表。"""
     # 根据 intent 选择 prompt
@@ -125,7 +127,7 @@ def expand_one(client, model: str, seed: SeedQuery, n_variants: int = 10,
     return variants
 
 
-def expand(seeds: list[SeedQuery], target_n: int, client, model: str,
+def expand(seeds: list[SeedQuery], target_n: int, client: OpenAI, model: str,
            rpm: int = 30, n_variants_per_seed: int = 15,
            max_rounds: int = 5) -> list[ExpandedQuery]:
     """从种子多轮扩张到 target_n 条查询。
@@ -208,9 +210,8 @@ def expand(seeds: list[SeedQuery], target_n: int, client, model: str,
     return results[:target_n] if len(results) >= target_n else results
 
 
-def _cache_path(tag: str, target_n: int) -> "Path":
+def _cache_path(tag: str, target_n: int) -> Path:
     """缓存文件路径：train/lora/data/.expanded_{tag}_{n}.json"""
-    from pathlib import Path
     # Path(__file__) = train/data_gen/query_expander.py
     # parents[0]=data_gen, parents[1]=train, parents[2]=项目根
     cache_dir = Path(__file__).resolve().parents[1] / "lora" / "data"
@@ -233,7 +234,8 @@ def _load_cache(tag: str, target_n: int) -> list[ExpandedQuery] | None:
         if len(data) < int(target_n * 0.95):
             return None
         return [ExpandedQuery(**item) for item in data]
-    except Exception:
+    except Exception as e:
+        logger.warning("[query_expander] 加载缓存失败 tag=%s n=%d: %s", tag, target_n, e)
         return None
 
 
@@ -249,7 +251,7 @@ def _save_cache(tag: str, target_n: int, items: list[ExpandedQuery]) -> None:
     )
 
 
-def expand_from_defaults(target_n: int, client, model: str,
+def expand_from_defaults(target_n: int, client: OpenAI, model: str,
                          rpm: int = 30) -> list[ExpandedQuery]:
     """使用默认业务种子列表扩张查询（带文件缓存）。"""
     cached = _load_cache("biz", target_n)
@@ -261,7 +263,7 @@ def expand_from_defaults(target_n: int, client, model: str,
     return result
 
 
-def expand_knowledge_from_defaults(target_n: int, client, model: str,
+def expand_knowledge_from_defaults(target_n: int, client: OpenAI, model: str,
                                    rpm: int = 30) -> list[ExpandedQuery]:
     """使用默认知识问答种子列表扩张查询（带文件缓存）。"""
     cached = _load_cache("knwl", target_n)

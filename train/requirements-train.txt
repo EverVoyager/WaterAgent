@@ -8,5 +8,5 @@ datasets==3.3.2
 accelerate==1.4.0
 vllm==0.7.3 ; sys_platform != "win32"   # vLLM 仅 Linux/容器
 # 数据生成与评估
-openai>=1.60.0
+openai>=1.60.0,<2.0
 pyyaml>=6.0

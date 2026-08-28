@@ -11,5 +11,14 @@ COPY train/requirements-train.txt ./train/requirements-train.txt
 RUN pip install --no-cache-dir torch==2.5.1 --index-url https://download.pytorch.org/whl/cu124 \
     && pip install --no-cache-dir -r train/requirements-train.txt
 
-COPY . .
+# 只复制训练需要的目录（.dockerignore 会进一步排除 .env / models / saves 等）
+COPY train/ ./train/
+COPY agent/ ./agent/
+COPY backend/app/ ./backend/app/
+COPY data/raw/regulations/ ./data/raw/regulations/
+
+# 非 root 用户运行
+RUN useradd -m -u 1001 appuser && chown -R appuser:appuser /workspace
+USER appuser
+
 CMD ["bash"]

@@ -9,7 +9,7 @@
 """
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, Tuple
+from typing import Any
 
 import numpy as np
 
@@ -31,14 +31,14 @@ RIVER_CENTERLINE = [
 class TerrainAnalysisResult:
     """地形分析结果，可直接序列化为 Agent 工具返回。"""
 
-    slope: Dict[str, Any] = field(default_factory=dict)
-    channel_cross_section: Dict[str, Any] = field(default_factory=dict)
-    inundation: Dict[str, Any] = field(default_factory=dict)
-    bbox: Tuple[float, float, float, float] = (0, 0, 0, 0)
+    slope: dict[str, Any] = field(default_factory=dict)
+    channel_cross_section: dict[str, Any] = field(default_factory=dict)
+    inundation: dict[str, Any] = field(default_factory=dict)
+    bbox: tuple[float, float, float, float] = (0, 0, 0, 0)
     crs: str = "EPSG:4326"
     analyzed_at: str = ""
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "slope": self.slope,
             "channel_cross_section": self.channel_cross_section,
@@ -109,7 +109,7 @@ class TerrainAnalyzer:
         self._slope_cache = slope
         return slope
 
-    def analyze_slope(self) -> Dict[str, Any]:
+    def analyze_slope(self) -> dict[str, Any]:
         """坡度统计分析：均值/最大值/高风险区面积。"""
         slope = self.compute_slope()
         valid_slope = slope[~np.isnan(slope)]
@@ -144,7 +144,7 @@ class TerrainAnalyzer:
     def analyze_channel_cross_section(
         self,
         river_level_m: float = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """沿河道横断面提取高程，计算河宽、最大水深、平均水深。
 
         横断面定义：在河道中心点附近，沿东西方向（垂直于南北流向）取一条切线。
@@ -226,7 +226,7 @@ class TerrainAnalyzer:
     def analyze_inundation(
         self,
         flood_level_m: float = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """给定洪水位高程，计算淹没范围。
 
         简化模型：所有高程 < flood_level_m 的区域视为淹没区。

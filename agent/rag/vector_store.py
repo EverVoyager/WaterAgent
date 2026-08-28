@@ -20,7 +20,7 @@
 接口与 FAISS 版完全一致，调用方无需改动。
 """
 import logging
-from typing import Any, Dict, List
+from typing import Any
 
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
@@ -31,9 +31,6 @@ from agent.rag.embedding import embed_query, embed_texts
 from app.core.llm import get_qdrant_client, get_qdrant_config
 
 logger = logging.getLogger(__name__)
-
-# 兼容旧引用（保留符号，但不再使用文件目录路径）
-FAISS_INDEX_DIR = "data/processed/faiss_index"
 
 
 # ====== 客户端 ======
@@ -54,14 +51,12 @@ def _vector_size() -> int:
 # ====== 构建 & 持久化 ======
 
 def build_and_persist_index(
-    chunks: List[RegulationChunk],
-    output_dir: str = FAISS_INDEX_DIR,  # 保留参数以兼容旧签名，实际忽略
+    chunks: list[RegulationChunk],
 ) -> int:
     """构建 Qdrant collection：创建/重建 → 批量 upsert 向量 + payload。
 
     Args:
         chunks: 已切分的法规 chunks
-        output_dir: 兼容旧签名的参数，Qdrant 版忽略
 
     Returns:
         索引中向量数量
@@ -100,7 +95,7 @@ def build_and_persist_index(
 
     # 批量 upsert（每批 64 条）
     points = []
-    for i, (chunk, vec) in enumerate(zip(chunks, vectors)):
+    for i, (chunk, vec) in enumerate(zip(chunks, vectors, strict=False)):
         payload = {
             "id": i,
             "text": chunk.text,
@@ -136,9 +131,7 @@ def build_and_persist_index(
 
 # ====== 加载 & 就绪检查 ======
 
-def load_vector_store(
-    index_dir: str = FAISS_INDEX_DIR,  # 兼容旧签名，忽略
-):
+def load_vector_store() -> tuple[QdrantClient, str] | None:
     """兼容旧接口：Qdrant 不需要显式加载，直接返回 client + collection 名。
 
     Returns:
@@ -149,7 +142,7 @@ def load_vector_store(
     return _get_client(), _collection_name()
 
 
-def is_index_ready(index_dir: str = FAISS_INDEX_DIR) -> bool:
+def is_index_ready() -> bool:
     """检查 Qdrant 服务可达 + collection 存在 + points 数 > 0。"""
     try:
         client = _get_client()
@@ -170,9 +163,8 @@ def is_index_ready(index_dir: str = FAISS_INDEX_DIR) -> bool:
 def search_regulations(
     query: str,
     top_k: int = 3,
-    index_dir: str = FAISS_INDEX_DIR,  # 兼容旧签名，忽略
     min_score: float = 0.3,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """检索法规。
 
     Args:
@@ -204,7 +196,7 @@ def search_regulations(
         with_payload=True,
     )
 
-    results: List[Dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
     for scored in response.points:
         score = float(scored.score)
         if score < min_score:

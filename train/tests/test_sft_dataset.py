@@ -35,7 +35,7 @@ def test_assistant_only_loss(tokenizer):
     ids, labels = sample["input_ids"], sample["labels"]
     assert len(ids) == len(labels)
     # 有监督 token（labels != -100）非空且占比合理
-    supervised = [i for i, lab in zip(ids, labels) if lab != -100]
+    supervised = [i for i, lab in zip(ids, labels, strict=False) if lab != -100]
     assert 0 < len(supervised) < len(ids)
     # 监督区解码后应包含最终等级文本
     text = tokenizer.decode(supervised)

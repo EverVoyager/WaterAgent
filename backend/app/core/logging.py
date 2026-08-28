@@ -19,7 +19,6 @@ from typing import Any
 
 import structlog
 
-
 # 普通日志级别到 structlog 方法的映射
 _LOG_LEVELS = {
     "DEBUG": logging.DEBUG,

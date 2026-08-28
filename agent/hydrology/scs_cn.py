@@ -23,8 +23,10 @@
 - 黄河中游暴雨洪水特性分析（黄委会水文局）
 """
 import logging
-from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any
+
+from agent.utils import now_iso as _now_iso
 
 logger = logging.getLogger(__name__)
 
@@ -48,10 +50,6 @@ STATION_BASIN = {
         "base_flow_m3_s": 1000,
     },
 }
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def compute_runoff_depth(p_mm: float, cn: float, lambda_coef: float = 0.2) -> float:
@@ -109,7 +107,7 @@ def _generate_flow_series(
     base_flow: float,
     lead_time_hours: int,
     tc_hours: float,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """生成流量过程线（钟形近似）。
 
     用 SCS 单位线思想：洪峰在 Tc 附近，前后衰减。
@@ -138,8 +136,8 @@ def predict_runoff_scs(
     station: str,
     rainfall_mm: float,
     lead_time_hours: int = 24,
-    rainfall_series: Optional[List[Dict[str, Any]]] = None,
-) -> Dict[str, Any]:
+    rainfall_series: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """SCS-CN 模型预测径流。
 
     Args:

@@ -9,7 +9,6 @@ def test_merge_calls_peft_api(tmp_path):
     fake_model.merge_and_unload.return_value = fake_model
     with patch("train.lora.merge.AutoModelForCausalLM") as m_auto, \
          patch("train.lora.merge.PeftModel") as m_peft, \
-         patch("train.lora.merge.AutoTokenizer") as m_tok, \
          patch("train.lora.merge.torch"):
         m_peft.from_pretrained.return_value = fake_model
         out = merge_adapter("base-x", "adapter-y", str(tmp_path / "merged"))

@@ -1,106 +1,147 @@
-"""测试 SSE 流式接口 v2：验证推理过程 + token 级流式输出。"""
+"""SSE 流式接口单元测试（离线，mock Agent 图入口）。
+
+覆盖 _stream_generator 的桥接逻辑：
+- 正常事件按序透传（reasoning_step/tool_call/tool_result/synth_meta/answer_delta/done）
+- 队列空闲时发心跳 comment 保活
+- LLMError → error 事件携带 kind/status_code；未知异常不带 kind
+- 请求体校验失败返回 422
+"""
 import json
-import sys
 import time
-from pathlib import Path
 
-import requests
+import pytest
+from fastapi.testclient import TestClient
 
-BACKEND_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = BACKEND_DIR.parent
-for p in (str(PROJECT_ROOT), str(BACKEND_DIR)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
+from agent.graph.errors import LLMError
+from app.main import create_app
 
 
-def test_stream(query: str, label: str):
-    print(f"\n{'=' * 70}")
-    print(f"[{label}] {query}")
-    print("=" * 70)
-    url = "http://127.0.0.1:8000/api/agent/query/stream"
-    payload = {"query": query, "history": []}
-    start = time.time()
-    event_count = 0
-    answer_text = ""
-    reasoning_count = 0
-    first_token_at = None
-    final_data = None
-    try:
-        with requests.post(url, json=payload, stream=True, timeout=180) as resp:
-            resp.raise_for_status()
-            for raw in resp.iter_lines(decode_unicode=True):
-                if not raw or not raw.startswith("data:"):
-                    continue
-                json_str = raw[5:].strip()
-                if not json_str:
-                    continue
-                try:
-                    event = json.loads(json_str)
-                except json.JSONDecodeError:
-                    continue
-                event_count += 1
-                elapsed = time.time() - start
-                etype = event.get("type")
-                if etype == "reasoning_step":
-                    reasoning_count += 1
-                    print(f"  +{elapsed:5.2f}s [reasoning] {event.get('step'):12s} "
-                          f"{event.get('phase'):8s} | {event.get('message')}")
-                elif etype == "intent":
-                    print(f"  +{elapsed:5.2f}s [intent]    {event.get('intent')}")
-                elif etype == "tool_call":
-                    print(f"  +{elapsed:5.2f}s [tool_call] {event.get('tool')} args={event.get('arguments')}")
-                elif etype == "tool_result":
-                    err = event.get("error", "")
-                    print(f"  +{elapsed:5.2f}s [tool_res]  {event.get('tool')} "
-                          f"{'ERR:' + err if err else 'OK'}")
-                elif etype == "synth_meta":
-                    data = event.get("data", {})
-                    print(f"  +{elapsed:5.2f}s [synth_meta] level={data.get('warning_level', '')} "
-                          f"actions={len(data.get('actions', []))}")
-                elif etype == "answer_delta":
-                    if first_token_at is None:
-                        first_token_at = elapsed
-                        print(f"  +{elapsed:5.2f}s [first_token] 首个 answer_delta 到达")
-                    answer_text += event.get("content", "")
-                elif etype == "done":
-                    final_data = event.get("data")
-                    print(f"  +{elapsed:5.2f}s [done] level={final_data.get('warning_level', '')} "
-                          f"intent={final_data.get('intent')} rounds={final_data.get('rounds', 0)}")
-                elif etype == "error":
-                    print(f"  +{elapsed:5.2f}s [error] {event.get('message')}")
-                    return False
-    except Exception as e:
-        print(f"  [exception] {e}")
-        return False
-
-    total = time.time() - start
-    print(f"\n  事件总数: {event_count}（推理步骤: {reasoning_count}）")
-    print(f"  首个 answer_delta 延迟: {first_token_at:.2f}s" if first_token_at else "  无 answer_delta")
-    print(f"  流式答案长度: {len(answer_text)}")
-    print(f"  总耗时: {total:.2f}s")
-    if final_data:
-        print(f"  最终 answer 长度: {len(final_data.get('answer', ''))}")
-        print(f"  答案前 120 字: {(answer_text or final_data.get('answer', ''))[:120]}")
-    return True
+@pytest.fixture()
+def client():
+    return TestClient(create_app())
 
 
-def main():
-    cases = [
-        ("你好", "闲聊"),
-        ("发生Ⅱ级预警时应该怎么响应？", "法规咨询"),
-        ("吴堡站当前水情如何？", "实时水情"),
+def _parse_sse(raw: str) -> tuple[list[dict], int]:
+    """把 SSE 响应原文解析为 (JSON 事件列表, 心跳 comment 数)。"""
+    events: list[dict] = []
+    keepalives = 0
+    for line in raw.splitlines():
+        if line.startswith("data: "):
+            events.append(json.loads(line[len("data: "):]))
+        elif line.startswith(":"):
+            keepalives += 1
+    return events, keepalives
+
+
+def _sample_events():
+    yield {"type": "reasoning_step", "step": "planner", "phase": "start",
+           "message": "规划中", "details": {}}
+    yield {"type": "tool_call", "tool": "get_hydrology",
+           "arguments": {"station": "吴堡"}, "round": 1}
+    yield {"type": "tool_result", "tool": "get_hydrology",
+           "result": {"station": "吴堡"}, "error": "", "round": 1}
+    yield {"type": "synth_meta",
+           "data": {"warning_level": "II", "reasoning": "流量超警戒",
+                    "actions": ["启动Ⅱ级响应"], "citations": []}}
+    yield {"type": "answer_delta", "content": "当前"}
+    yield {"type": "answer_delta", "content": "水情超警戒"}
+    yield {"type": "done",
+           "data": {"answer": "当前水情超警戒", "warning_level": "II",
+                    "reasoning": "流量超警戒", "actions": ["启动Ⅱ级响应"],
+                    "citations": [], "tool_calls": [], "rounds": 1,
+                    "intent": "agent_task"}}
+
+
+def _stream_once(client: TestClient, query: str = "吴堡站现在水情怎么样") -> str:
+    with client.stream(
+        "POST", "/api/agent/query/stream", json={"query": query},
+    ) as resp:
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/event-stream")
+        assert resp.headers.get("cache-control") == "no-cache"
+        return "".join(resp.iter_text())
+
+
+def test_stream_events_passthrough_in_order(client, monkeypatch):
+    """全部事件按产出顺序透传，done 为最后一条且数据完整。"""
+    monkeypatch.setattr(
+        "app.api.agent.run_graph_agent_stream_v2", lambda **kw: _sample_events(),
+    )
+    raw = _stream_once(client)
+    events, _ = _parse_sse(raw)
+    types = [e["type"] for e in events]
+    assert types == [
+        "reasoning_step", "tool_call", "tool_result",
+        "synth_meta", "answer_delta", "answer_delta", "done",
     ]
-    results = []
-    for q, label in cases:
-        ok = test_stream(q, label)
-        results.append((label, ok))
-
-    print(f"\n{'=' * 70}")
-    print("测试结果汇总")
-    print("=" * 70)
-    for label, ok in results:
-        print(f"  {label}: {'PASS' if ok else 'FAIL'}")
+    # synth_meta 先于 answer_delta 到达（前端先渲染预警卡再流式补答案）
+    assert types.index("synth_meta") < types.index("answer_delta")
+    done_data = events[-1]["data"]
+    assert done_data["answer"] == "当前水情超警戒"
+    assert done_data["warning_level"] == "II"
 
 
-if __name__ == "__main__":
-    main()
+def test_stream_keepalive_comment(client, monkeypatch):
+    """生成器迟迟不出数时主线程发心跳 comment。"""
+    monkeypatch.setattr("app.api.agent.SSE_KEEPALIVE_INTERVAL", 0.05)
+
+    def _slow_events():
+        time.sleep(0.3)
+        yield from _sample_events()
+
+    monkeypatch.setattr(
+        "app.api.agent.run_graph_agent_stream_v2", lambda **kw: _slow_events(),
+    )
+    raw = _stream_once(client)
+    _, keepalives = _parse_sse(raw)
+    assert keepalives >= 1
+    # 心跳不打断后续事件完整性
+    events, _ = _parse_sse(raw)
+    assert events[-1]["type"] == "done"
+
+
+def test_stream_llm_error_carries_kind_and_status(client, monkeypatch):
+    """LLMError 映射为 error 事件并保留 kind/status_code（非流式接口同款分类）。"""
+
+    def _raise_before_stream(**kw):
+        raise LLMError("timeout", "LLM 调用超时：60s", status_code=504)
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(
+        "app.api.agent.run_graph_agent_stream_v2", _raise_before_stream,
+    )
+    raw = _stream_once(client)
+    events, _ = _parse_sse(raw)
+    errs = [e for e in events if e["type"] == "error"]
+    assert len(errs) == 1
+    assert errs[0]["kind"] == "timeout"
+    assert errs[0]["status_code"] == 504
+    assert "LLM 调用超时" in errs[0]["message"]
+    # 无 done 事件
+    assert all(e["type"] != "done" for e in events)
+
+
+def test_stream_unknown_error_has_no_kind(client, monkeypatch):
+    """未知异常（如工具 NameError 回归）也封装为 error 事件，不带 kind 字段。"""
+
+    def _boom(**kw):
+        yield {"type": "answer_delta", "content": "部分输出"}
+        raise RuntimeError("unexpected boom")
+
+    monkeypatch.setattr(
+        "app.api.agent.run_graph_agent_stream_v2", lambda **kw: _boom(),
+    )
+    raw = _stream_once(client)
+    events, _ = _parse_sse(raw)
+    errs = [e for e in events if e["type"] == "error"]
+    assert len(errs) == 1
+    assert "kind" not in errs[0]
+    assert "unexpected boom" in errs[0]["message"]
+    # error 前已推送的 answer_delta 不回滚（已产出的部分保留）
+    assert any(e["type"] == "answer_delta" for e in events)
+
+
+def test_stream_invalid_body_422(client):
+    """query 为空串校验失败返回 422，不进入流式响应。"""
+    resp = client.post("/api/agent/query/stream", json={"query": ""})
+    assert resp.status_code == 422

@@ -9,9 +9,10 @@
 import json
 import logging
 import time
-from typing import Optional
+from pathlib import Path
 
-from app.core.llm import get_default_system_prompt
+from openai import OpenAI
+
 from train.data_gen.seed_queries import SeedQuery
 
 logger = logging.getLogger(__name__)
@@ -28,8 +29,8 @@ _KNOWLEDGE_SYSTEM_PROMPT = """你是黄河吕梁段防汛预警智能体，名�
 """
 
 
-def synthesize_knowledge_one(client, model: str, seed: SeedQuery,
-                             temperature: float = 0.7) -> Optional[dict]:
+def synthesize_knowledge_one(client: OpenAI, model: str, seed: SeedQuery,
+                             temperature: float = 0.7) -> dict | None:
     """对单条知识查询生成轨迹（无工具调用）。
 
     返回 {"query": ..., "messages": [...]} 或 None。
@@ -58,8 +59,8 @@ def synthesize_knowledge_one(client, model: str, seed: SeedQuery,
         return None
 
 
-def synthesize_knowledge_dataset(client, model: str, seeds: list[SeedQuery],
-                                 out_path, rpm: int = 30) -> int:
+def synthesize_knowledge_dataset(client: OpenAI, model: str, seeds: list[SeedQuery],
+                                 out_path: Path, rpm: int = 30) -> int:
     """批量生成知识问答轨迹，追加写盘 + 断点续传。
 
     Returns:

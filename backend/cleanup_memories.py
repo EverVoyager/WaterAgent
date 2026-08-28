@@ -16,6 +16,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(BACKEND_DIR))
 
 import pymysql
+
 from app.core.config import get_settings
 
 DEDUP_PREFIX_LEN = 12

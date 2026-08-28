@@ -26,6 +26,7 @@ for _p in (_PROJECT_ROOT, _BACKEND_ROOT):
         sys.path.insert(0, _p)
 
 from dotenv import load_dotenv
+
 load_dotenv(Path(_BACKEND_ROOT) / ".env")
 
 from agent.tools.schemas import TOOL_DESCRIPTIONS, TOOL_PARAM_MODELS
@@ -128,9 +129,7 @@ def convert_record(messages: list, tools_json: str) -> dict | None:
     # 校验奇偶位置
     for i, conv in enumerate(conversations):
         from_tag = conv["from"]
-        if i % 2 == 0 and from_tag not in ("human", "observation"):
-            return None
-        elif i % 2 == 1 and from_tag not in ("gpt", "function_call"):
+        if i % 2 == 0 and from_tag not in ("human", "observation") or i % 2 == 1 and from_tag not in ("gpt", "function_call"):
             return None
 
     return {
@@ -140,7 +139,7 @@ def convert_record(messages: list, tools_json: str) -> dict | None:
     }
 
 
-def main():
+def main() -> None:
     # 输入：WaterAgents 的训练/验证集
     src_dir = Path("train/lora/data")
     train_path = src_dir / "hermes_fc_v1.jsonl"
@@ -188,7 +187,7 @@ def main():
     # 打印一条样本供检查
     if out_train.exists():
         sample = json.loads(out_train.read_text(encoding="utf-8").splitlines()[0])
-        print(f"\n[convert] 样本 conversations:")
+        print("\n[convert] 样本 conversations:")
         for c in sample["conversations"][:6]:
             val_preview = c["value"][:100] + "..." if len(c["value"]) > 100 else c["value"]
             print(f"  {c['from']:15s} | {val_preview}")

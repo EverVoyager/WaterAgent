@@ -4,12 +4,15 @@
 工具结果重算得出，与线上规则引擎单一同源。
 """
 import json
+import logging
 from enum import Enum
 
 from agent.graph.synthesizer import compute_warning_level
 from agent.tools.schemas import TOOL_PARAM_MODELS
 from train.data_gen.hermes_format import parse_final_answer, parse_trace
 from train.data_gen.scenario import Scenario
+
+logger = logging.getLogger(__name__)
 
 
 class FilterResult(Enum):
@@ -27,7 +30,9 @@ def _f1_params_valid(tool_calls: list) -> bool:
             continue
         try:
             model(**call["arguments"])
-        except Exception:
+        except Exception as e:
+            logger.warning("[filters] F1 参数校验失败 tool=%s args=%s: %s",
+                           call.get("name"), call.get("arguments"), e)
             return False
     return True
 
@@ -46,9 +51,8 @@ def _f2_sequence_valid(tool_calls: list) -> bool:
     sigs = [(c["name"], json.dumps(c["arguments"], sort_keys=True)) for c in tool_calls]
     if len(sigs) != len(set(sigs)):
         return False
-    if "generate_plan" in names and names.index("generate_plan") != len(names) - 1:
-        return False
-    return True
+    # generate_plan 必须是最后一个工具（先收集完信息再出预案）
+    return not ("generate_plan" in names and names.index("generate_plan") != len(names) - 1)
 
 
 def filter_trace(messages: list, scenario: Scenario) -> FilterResult:

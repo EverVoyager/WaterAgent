@@ -3,7 +3,7 @@ uvicorn[standard]==0.30.6
 pydantic==2.9.2
 pydantic-settings==2.5.2
 python-dotenv==1.0.1
-openai==1.51.0
+openai>=1.60.0,<2.0
 langgraph==0.2.34
 langchain-core==0.3.7
 langchain-text-splitters==0.3.0
@@ -19,9 +19,8 @@ scipy==1.13.1
 requests==2.32.3
 # Phase 1 安全：Rate Limiting
 slowapi==0.1.9
-# Phase 4 监控：结构化日志 + LLM 追踪
+# Phase 4 监控：结构化日志
 structlog==24.4.0
-langfuse==2.51.0
 httpx==0.27.2
 # 自进化记忆：MySQL 持久化（PyMySQL 纯 Python 实现，Windows 友好）
 PyMySQL==1.1.1

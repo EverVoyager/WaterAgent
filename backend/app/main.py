@@ -12,17 +12,36 @@ _BACKEND_ROOT = str(Path(__file__).resolve().parents[1])
 if _BACKEND_ROOT not in sys.path:
     sys.path.insert(0, _BACKEND_ROOT)
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-from slowapi.util import get_remote_address
+from slowapi.middleware import SlowAPIMiddleware
 
 from app.api.agent import router as agent_router
 from app.api.health import router as health_router
+from app.api.memories import router as memories_router
+from app.api.sessions import router as sessions_router
+from app.api.skills import router as skills_router
 from app.core.config import get_settings
 from app.core.logging import setup_logging
+from app.core.rate_limit import limiter
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期：启动 Curator 后台治理线程（记忆剪枝/压缩/索引对账）。"""
+    try:
+        from agent.memory.curator import start_curator_thread
+        start_curator_thread()
+    except Exception as e:
+        # 治理线程启动失败不影响服务本身
+        import logging
+        logging.getLogger(__name__).warning("[startup] Curator 启动失败（不影响服务）：%s", e)
+    yield
 
 
 def create_app() -> FastAPI:
@@ -36,16 +55,16 @@ def create_app() -> FastAPI:
         title=settings.APP_NAME,
         version=settings.APP_VERSION,
         description="黄河吕梁段防汛预警智能体后端服务",
+        lifespan=lifespan,
     )
 
     # ====== Rate Limiting（P1.2 slowapi）======
-    # 默认每分钟每 IP RATE_LIMIT_PER_MINUTE 次请求
-    limiter = Limiter(
-        key_func=get_remote_address,
-        default_limits=[f"{settings.RATE_LIMIT_PER_MINUTE}/minute"],
-    )
+    # limiter 实例在 app.core.rate_limit 中定义（避免循环导入）
+    # default_limits 覆盖所有端点；敏感端点可在路由上用 @limiter.limit 收紧
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    # 必须注册中间件，default_limits 才会真正生效
+    app.add_middleware(SlowAPIMiddleware)
 
     # ====== CORS（P1.3 production 收紧）======
     # production 模式不允许通配符，必须显式列出域名
@@ -59,13 +78,16 @@ def create_app() -> FastAPI:
         allow_origins=settings.cors_origins_list,
         allow_credentials=True,
         # production 收紧方法：只允许业务需要的
-        allow_methods=["GET", "POST"] if settings.is_production else ["*"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"] if settings.is_production else ["*"],
         allow_headers=["Content-Type", "Authorization"] if settings.is_production else ["*"],
     )
 
     # ====== 路由注册 ======
     app.include_router(health_router)
     app.include_router(agent_router)
+    app.include_router(skills_router)
+    app.include_router(memories_router)
+    app.include_router(sessions_router)
 
     # ====== 全局异常处理（P2 异常分类）======
     @app.exception_handler(Exception)

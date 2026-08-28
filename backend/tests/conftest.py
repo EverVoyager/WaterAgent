@@ -1,60 +1,51 @@
-"""pytest 共享夹具与路径配置。
-
-将项目根目录加入 sys.path，使 `agent.*` 与 `app.*` 可被导入。
-"""
+"""pytest 全局 fixtures。"""
+import contextlib
 import sys
 from pathlib import Path
 
-# 项目根目录 = backend/tests 的上两级
+# 确保项目根目录在 sys.path 中（agent 模块在项目根，不在 backend/ 下）
 _PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-# backend 目录（使 app.* 可导入）
-_BACKEND_ROOT = str(Path(__file__).resolve().parents[1])
-if _BACKEND_ROOT not in sys.path:
-    sys.path.insert(0, _BACKEND_ROOT)
-
-# 强制使用测试环境配置：避免读取真实 .env 中的 API Key
-import os
-os.environ.setdefault("APP_ENV", "development")
-os.environ.setdefault("LLM_API_KEY", "sk-test-placeholder")
-os.environ.setdefault("AMAP_API_KEY", "")
-os.environ.setdefault("QDRANT_HOST", "127.0.0.1")
-
 import pytest
 
-# 已知联机测试文件（需外部服务：后端 API / LLM / Qdrant / 外部 HTTP）
-# 不在此列表的测试默认视为离线单元测试，无外部服务也能秒过。
-_INTEGRATION_FILES = {
-    "test_hydro_source.py",    # qqjjsj.com 实时水情爬虫
-    "test_round2_fix.py",      # 后端 /api/agent/query 端到端
-    "test_sse_stream.py",      # 后端 SSE 流式 + LLM
-    "test_stage_f_tools.py",   # fetch_hydrology / fetch_weather 外部 API
-}
+from agent.skills.models import SkillCreate
+from agent.skills.skill_store import get_skill_store, is_skill_store_enabled
 
 
-def pytest_collection_modifyitems(config, items):
-    """自动给联机测试文件加 integration 标记。
+@pytest.fixture(autouse=True)
+def _restore_skills_table():
+    """测试前后保持 skills 表数据不变（备份 → 测试 → 恢复）。
 
-    无 RUN_INTEGRATION=1 时跳过联机测试，避免无外部服务时测试套件挂死
-    （Qdrant/HTTP 重试无快速失败）。CI 与本地默认只跑离线子集。
+    避免 pytest 清空生产数据。仅在 MySQL 可用时执行。
     """
-    skip_marker = pytest.mark.skip(
-        reason="联机测试需 RUN_INTEGRATION=1 才运行；默认跳过避免无外部服务时挂死"
-    )
-    run_integration = os.environ.get("RUN_INTEGRATION") == "1"
-    for item in items:
-        filename = Path(item.fspath).name
-        if filename in _INTEGRATION_FILES:
-            item.add_marker(pytest.mark.integration)
-            if not run_integration:
-                item.add_marker(skip_marker)
-        else:
-            item.add_marker(pytest.mark.unit)
+    if not is_skill_store_enabled():
+        yield
+        return
 
+    store = get_skill_store()
+    # 备份现有数据（建表失败等由具体测试处理）
+    backup = []
+    with contextlib.suppress(Exception):
+        backup = store.list_skills(enabled_only=False)
 
-@pytest.fixture(scope="session")
-def project_root() -> Path:
-    """返回项目根目录。"""
-    return Path(_PROJECT_ROOT)
+    # 测试前清空（隔离）
+    with contextlib.suppress(Exception):
+        store.delete_all()
+
+    yield
+
+    # 测试后恢复原数据
+    try:
+        store.delete_all()
+        for skill in backup:
+            store.create_skill(SkillCreate(
+                name=skill.name,
+                description=skill.description,
+                instructions=skill.instructions,
+                tool_names=skill.tool_names,
+                enabled=skill.enabled,
+            ))
+    except Exception:
+        pass  # 恢复失败不阻塞测试退出

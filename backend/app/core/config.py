@@ -1,7 +1,6 @@
 """应用配置管理。"""
 import logging
 from functools import lru_cache
-from typing import List
 
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -24,7 +23,7 @@ class Settings(BaseSettings):
     )
 
     # 应用基础信息
-    APP_NAME: str = "yellow-river-agent"
+    APP_NAME: str = "water-agents"
     APP_VERSION: str = "0.1.0"
     APP_ENV: str = "development"  # development / production
 
@@ -45,12 +44,8 @@ class Settings(BaseSettings):
     LLM_MAX_TOKENS: int = 2048
     # 单次会话最大工具调用轮次（防止死循环）
     LLM_MAX_TOOL_ROUNDS: int = 5
-    # Embedding 模型（用于意图路由 Semantic Router）
+    # Embedding 模型（用于法规 RAG 检索 + Skill 匹配）
     LLM_EMBEDDING_MODEL: str = "text-embedding-v3"
-
-    # Semantic Router 阈值（M7：可配置化）
-    # 低于此余弦相似度阈值时退化为规则化兜底
-    SEMANTIC_ROUTER_THRESHOLD: float = 0.55
 
     # Qdrant 向量库配置（用于法规 RAG 检索）
     QDRANT_HOST: str = "127.0.0.1"
@@ -66,6 +61,11 @@ class Settings(BaseSettings):
     # 吕梁市 adcode（高德城市编码）
     AMAP_CITY_CODE: str = "141100"
 
+    # Tavily 联网搜索 API（用于 web_search 工具）
+    # 申请：https://tavily.com（免费额度 1000 次/月）
+    # 留空则降级到 mock
+    TAVILY_API_KEY: str = ""
+
     # 水文数据源配置（阶段 F 接入实时水情）
     # 数据源：qqjjsj.com 每日发布黄河水文站水位流量（来源于水利部公开数据）
     HYDRO_SOURCE_URL: str = "http://www.qqjjsj.com/list226a1/"
@@ -75,10 +75,11 @@ class Settings(BaseSettings):
     # Rate Limiting（slowapi）
     RATE_LIMIT_PER_MINUTE: int = 30
 
-    # LangFuse LLM 追踪（可选，留空则不启用）
-    LANGFUSE_HOST: str = ""
-    LANGFUSE_PUBLIC_KEY: str = ""
-    LANGFUSE_SECRET_KEY: str = ""
+    # 上下文 token 压缩（借鉴 Codex compact.rs）
+    # history 总 token 超过此值时触发 LLM 摘要压缩
+    HISTORY_MAX_TOKENS: int = 4000
+    # 压缩时保留最近几轮原文（1 轮 = 1 问 1答 = 2 条消息）
+    HISTORY_KEEP_RECENT_ROUNDS: int = 2
 
     # MySQL 配置（自进化长期记忆存储）
     # 留空则禁用自进化（reflection 仍可运行但记忆不持久化）
@@ -89,6 +90,11 @@ class Settings(BaseSettings):
     MYSQL_DATABASE: str = "water_agent"
     # 自进化开关（关闭时反思循环不运行）
     SELF_EVOLUTION_ENABLED: bool = True
+    # Curator 后台治理（借鉴 Hermes Agent v0.12.0 Curator）：
+    # 周期性剪枝僵尸记忆 / LLM 压缩合并 / 向量索引对账 / 写治理报告
+    CURATOR_ENABLED: bool = True
+    # 治理周期（小时），默认 168h = 7 天（对齐 Hermes Curator 的 7-day cycle）
+    CURATOR_INTERVAL_HOURS: int = 168
 
     @field_validator("CORS_ORIGINS")
     @classmethod
@@ -119,7 +125,7 @@ class Settings(BaseSettings):
         return self
 
     @property
-    def cors_origins_list(self) -> List[str]:
+    def cors_origins_list(self) -> list[str]:
         return self.CORS_ORIGINS.split(",")
 
     @property

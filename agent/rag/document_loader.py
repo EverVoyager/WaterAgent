@@ -8,13 +8,15 @@
 2. 按 ## 章节标题分块，每块作为独立 chunk
 3. 章节内若超过 chunk_size，使用 RecursiveCharacterTextSplitter 二次切分并保留 overlap
 """
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List
 
 import yaml
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+logger = logging.getLogger(__name__)
 
 # 默认切分参数
 DEFAULT_CHUNK_SIZE = 600
@@ -35,9 +37,9 @@ class RegulationChunk:
     article: str = ""                           # 第几条（如 "第四十一条"，可能为空）
     source_file: str = ""                       # 原始文件名
     chunk_index: int = 0                        # 该文件内的 chunk 序号
-    extra: Dict[str, str] = field(default_factory=dict)
+    extra: dict[str, str] = field(default_factory=dict)
 
-    def to_metadata(self) -> Dict[str, str]:
+    def to_metadata(self) -> dict[str, str]:
         """转为可序列化的 metadata dict（用于持久化）。"""
         meta = {
             "title": self.title,
@@ -57,7 +59,7 @@ class RegulationChunk:
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n(.*)$", re.DOTALL)
 
 
-def parse_frontmatter(content: str) -> tuple[Dict[str, str], str]:
+def parse_frontmatter(content: str) -> tuple[dict[str, str], str]:
     """解析 Markdown YAML frontmatter。
 
     Returns:
@@ -83,7 +85,7 @@ _SUBCHAPTER_RE = re.compile(r"^###\s+(.+)$", re.MULTILINE)
 _ARTICLE_RE = re.compile(r"\*\*(第[一二三四五六七八九十百零]+条)\*\*")
 
 
-def _split_by_chapter(body: str) -> List[tuple[str, str]]:
+def _split_by_chapter(body: str) -> list[tuple[str, str]]:
     """按 ## 章节标题切分正文，再按 ### 子章节进一步切分。
 
     这样既能保留章节上下文，又能让子章节（如 4.1 Ⅳ级响应、4.2 Ⅲ级响应）
@@ -97,7 +99,7 @@ def _split_by_chapter(body: str) -> List[tuple[str, str]]:
     if not matches:
         return [("", body)]
 
-    chunks: List[tuple[str, str]] = []
+    chunks: list[tuple[str, str]] = []
     for i, m in enumerate(matches):
         chapter_title = m.group(1).strip()
         start = m.end()
@@ -141,7 +143,7 @@ def split_markdown_to_chunks(
     source_file: str = "",
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
-) -> List[RegulationChunk]:
+) -> list[RegulationChunk]:
     """将单个 Markdown 法规文档切分为 chunks。"""
     meta, body = parse_frontmatter(content)
     title = meta.get("title", Path(source_file).stem or "未命名")
@@ -158,7 +160,7 @@ def split_markdown_to_chunks(
         separators=["\n\n", "\n", "。", "；", "，", " ", ""],
     )
 
-    chunks: List[RegulationChunk] = []
+    chunks: list[RegulationChunk] = []
     global_idx = 0
     for chapter_title, chapter_body in chapters:
         sub_texts = splitter.split_text(chapter_body)
@@ -181,21 +183,21 @@ def split_markdown_to_chunks(
     return chunks
 
 
-def load_regulation_files(directory: str) -> List[RegulationChunk]:
+def load_regulation_files(directory: str) -> list[RegulationChunk]:
     """加载目录下所有 *.md 法规文档，返回切分后的 chunks。"""
     dir_path = Path(directory)
     if not dir_path.exists():
         return []
 
-    all_chunks: List[RegulationChunk] = []
+    all_chunks: list[RegulationChunk] = []
     md_files = sorted(dir_path.glob("*.md"))
     for md_file in md_files:
         try:
             content = md_file.read_text(encoding="utf-8")
         except Exception as e:
-            print(f"[document_loader] 读取失败 {md_file.name}: {e}")
+            logger.warning("[document_loader] 读取失败 %s: %s", md_file.name, e)
             continue
         chunks = split_markdown_to_chunks(content, source_file=md_file.name)
         all_chunks.extend(chunks)
-        print(f"[document_loader] {md_file.name} -> {len(chunks)} chunks")
+        logger.info("[document_loader] %s -> %d chunks", md_file.name, len(chunks))
     return all_chunks

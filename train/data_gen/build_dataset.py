@@ -25,9 +25,11 @@ for _p in (_PROJECT_ROOT, _BACKEND_ROOT):
 
 # 显式加载 backend/.env（pydantic 的 env_file=".env" 按工作目录查找，从项目根运行时找不到）
 from dotenv import load_dotenv  # noqa: E402
+
 load_dotenv(Path(_BACKEND_ROOT) / ".env")
 
 from openai import OpenAI  # noqa: E402
+from tqdm import tqdm  # noqa: E402
 
 from app.core.config import get_settings  # noqa: E402
 from train.data_gen.dpo_pairs import build_dpo_pair, write_dpo_jsonl  # noqa: E402
@@ -42,8 +44,6 @@ from train.data_gen.scenario import from_expanded_queries  # noqa: E402
 from train.data_gen.seed_queries import SeedQuery  # noqa: E402
 from train.data_gen.stats import print_report, summarize  # noqa: E402
 from train.data_gen.teacher import synthesize_dataset  # noqa: E402
-
-from tqdm import tqdm  # noqa: E402
 
 
 def split_train_val(records: list, val_ratio: float, seed: int) -> tuple:
@@ -126,7 +126,7 @@ def main() -> None:
     low_score_pool = {}  # scenario_id -> (record, scn) 低分轨迹（DPO 候选）
     rejects = Counter()
 
-    raw_lines = [l for l in raw_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+    raw_lines = [line for line in raw_path.read_text(encoding="utf-8").splitlines() if line.strip()]
     # 建立 scenario_id -> scenario 索引（O(1) 查找）
     scn_map = {s.scenario_id: s for s in scenarios}
     judge_label = "F1/F2 过滤" if args.no_judge else "F1/F2 + 评判"
@@ -181,7 +181,7 @@ def main() -> None:
             teacher_client, settings.LLM_MODEL, retry_scenarios, retry_raw_path, rpm=args.rpm
         )
 
-        retry_lines = [l for l in retry_raw_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+        retry_lines = [line for line in retry_raw_path.read_text(encoding="utf-8").splitlines() if line.strip()]
         for line in tqdm(retry_lines, desc="DPO 评判", unit="条",
                          bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"):
             rec = json.loads(line)

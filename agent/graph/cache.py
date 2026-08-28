@@ -5,7 +5,7 @@
 import json
 import logging
 import time
-from typing import Any, Dict
+from typing import Any
 
 from agent.tools.mock_executor import execute_tool
 
@@ -14,18 +14,32 @@ logger = logging.getLogger(__name__)
 # 进程级 LRU + TTL 缓存：key = (tool_name, sorted_args_json)
 # 仅缓存幂等工具（不缓存 generate_plan 这类需要 LLM 生成的）
 _CACHEABLE_TOOLS = {"get_weather", "get_hydrology", "predict_runoff", "query_gis_terrain", "search_regulation"}
-_TOOL_RESULT_CACHE: Dict[str, tuple[float, Dict[str, Any]]] = {}
+_TOOL_RESULT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _TOOL_CACHE_TTL = 300.0  # 5 分钟
+_CACHE_MAX_ENTRIES = 256  # 容量上限：防止参数多样化时缓存无限增长
 
 
-def _cache_key(tool_name: str, arguments: Dict[str, Any]) -> str:
+def _evict_if_needed(now: float) -> None:
+    """容量超限时先清过期条目，仍超则淘汰最旧条目。"""
+    if len(_TOOL_RESULT_CACHE) < _CACHE_MAX_ENTRIES:
+        return
+    expired = [k for k, (ts, _) in _TOOL_RESULT_CACHE.items()
+               if now - ts >= _TOOL_CACHE_TTL]
+    for k in expired:
+        del _TOOL_RESULT_CACHE[k]
+    if len(_TOOL_RESULT_CACHE) >= _CACHE_MAX_ENTRIES:
+        oldest_key = min(_TOOL_RESULT_CACHE, key=lambda k: _TOOL_RESULT_CACHE[k][0])
+        del _TOOL_RESULT_CACHE[oldest_key]
+
+
+def _cache_key(tool_name: str, arguments: dict[str, Any]) -> str:
     try:
         return f"{tool_name}:{json.dumps(arguments, sort_keys=True, ensure_ascii=False)}"
     except (TypeError, ValueError):
         return f"{tool_name}:{arguments}"
 
 
-def _cached_execute_tool(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+def _cached_execute_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     """带缓存的工具执行。仅缓存幂等工具，TTL 5 分钟。
 
     注意：hydrology/weather 已有各自的内部缓存（30min/10min），
@@ -46,5 +60,6 @@ def _cached_execute_tool(tool_name: str, arguments: Dict[str, Any]) -> Dict[str,
 
     result = execute_tool(tool_name, arguments)
     if isinstance(result, dict) and not result.get("error"):
+        _evict_if_needed(now)
         _TOOL_RESULT_CACHE[key] = (now, result)
     return result

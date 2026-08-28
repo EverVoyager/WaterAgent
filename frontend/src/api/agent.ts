@@ -1,5 +1,3 @@
-import http from './instance'
-
 export interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
@@ -11,6 +9,15 @@ export interface ToolCallInfo {
   result: Record<string, any>
   error: string
   round: number
+}
+
+/** 引用来源（仅联网搜索结果，后端已校验原文真实性） */
+export interface Citation {
+  ref_id: number
+  quote: string
+  source_type: 'web_search'
+  title: string
+  url: string
 }
 
 export interface AgentQueryRequest {
@@ -25,13 +32,9 @@ export interface AgentQueryResponse {
   reasoning: string
   actions: string[]
   tool_calls: ToolCallInfo[]
+  citations: Citation[]
   rounds: number
   intent: 'chitchat' | 'agent_task'
-}
-
-/** Agent 查询接口（非流式，保留兼容） */
-export function queryAgent(req: AgentQueryRequest) {
-  return http.post<AgentQueryResponse, AgentQueryResponse>('/agent/query', req)
 }
 
 // ====== SSE 流式接口 ======
@@ -49,6 +52,7 @@ export interface SynthMeta {
   warning_level: 'I' | 'II' | 'III' | 'IV' | ''
   reasoning: string
   actions: string[]
+  citations?: Citation[]
 }
 
 /** SSE 事件类型 */
@@ -110,6 +114,8 @@ export function queryAgentStream(
 
   let silenceTimer: ReturnType<typeof setTimeout> | null = null
   let totalTimer: ReturnType<typeof setTimeout> | null = null
+  // 是否已收到终止事件（done/error）。流正常结束（EOF）但未收到终止事件时视为连接中断
+  let receivedTerminal = false
 
   const clearTimers = () => {
     if (silenceTimer) clearTimeout(silenceTimer)
@@ -144,7 +150,10 @@ export function queryAgentStream(
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`)
       }
-      const reader = response.body!.getReader()
+      if (!response.body) {
+        throw new Error('响应无内容（body 为空）')
+      }
+      const reader = response.body.getReader()
       const decoder = new TextDecoder('utf-8')
       let buffer = ''
 
@@ -173,6 +182,7 @@ export function queryAgentStream(
             onEvent(event)
             // done/error 事件后清理计时器
             if (event.type === 'done' || event.type === 'error') {
+              receivedTerminal = true
               clearTimers()
             }
           } catch (e) {
@@ -181,6 +191,12 @@ export function queryAgentStream(
         }
       }
       clearTimers()
+      // 流正常结束（EOF）但始终未收到 done/error：服务端异常关闭，
+      // 主动触发 onError 兜底，避免上层 loading 永久卡住
+      if (!receivedTerminal) {
+        console.warn('[SSE] 流结束但未收到终止事件（done/error），判定连接中断')
+        if (onError) onError(new Error('连接中断，未收到完整响应'))
+      }
     })
     .catch((err) => {
       clearTimers()

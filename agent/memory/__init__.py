@@ -15,6 +15,8 @@
 - 在 synthesizer_node 注入"用户偏好"
 """
 from agent.memory.experience import (
+    clear_injected_tracking,
+    get_injected_memories,
     get_relevant_experiences,
     get_user_preferences,
 )
@@ -25,8 +27,8 @@ from agent.memory.memory_store import (
     is_memory_enabled,
 )
 from agent.memory.reflection import (
-    should_reflect,
     run_reflection_async,
+    should_reflect,
 )
 
 __all__ = [
@@ -41,4 +43,6 @@ __all__ = [
     # experience
     "get_relevant_experiences",
     "get_user_preferences",
+    "clear_injected_tracking",
+    "get_injected_memories",
 ]

@@ -5,7 +5,6 @@
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple
 
 import numpy as np
 import rasterio
@@ -32,11 +31,11 @@ class DEMDataset:
     nodata: float  # 无效值
 
     @property
-    def shape(self) -> Tuple[int, int]:
+    def shape(self) -> tuple[int, int]:
         return self.elevation.shape
 
     @property
-    def resolution_m(self) -> Tuple[float, float]:
+    def resolution_m(self) -> tuple[float, float]:
         """返回像素分辨率（米）。"""
         # SRTM 在赤道附近约 30m，纬度越高经度方向分辨率越低
         # 这里直接用 transform 的像素大小（单位：度）转米
@@ -51,8 +50,8 @@ class DEMDataset:
 
 
 def load_study_dem(
-    dem_path: Optional[Path] = None,
-    bbox: Optional[Tuple[float, float, float, float]] = None,
+    dem_path: Path | None = None,
+    bbox: tuple[float, float, float, float] | None = None,
 ) -> DEMDataset:
     """加载研究区 DEM 数据。
 
@@ -111,7 +110,7 @@ def load_study_dem(
         raise RuntimeError(f"无法打开 DEM 文件: {dem_path}: {e}") from e
 
 
-def is_dem_ready(dem_path: Optional[Path] = None) -> bool:
+def is_dem_ready(dem_path: Path | None = None) -> bool:
     """检查 DEM 数据是否已就绪。"""
     dem_path = Path(dem_path) if dem_path else DEFAULT_DEM_PATH
     return dem_path.exists()

@@ -5,81 +5,107 @@
 提供：
 - build_agent_graph()：构建并编译 LangGraph
 - run_graph_agent()：同步入口
-- run_graph_agent_stream()：旧流式入口
-- run_graph_agent_stream_v2()：新流式入口（v2）
-- _route_by_intent / _route_after_executor：条件边
+- run_graph_agent_stream_v2()：流式入口（手动驱动状态机，支持推理过程可视化）
+- _route_after_planner / _route_after_executor：条件边
 """
 import logging
-import re
-from typing import Any, Dict, List
+import threading
+from collections.abc import Iterator
+from typing import Any
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.state import CompiledStateGraph
 
+from agent.graph.context_compact import compact_history
+from agent.graph.direct_chat_stream import _direct_chat_stream
+from agent.graph.errors import LLMError
 from agent.graph.nodes import (
-    MAX_ROUNDS,
-    _direct_chat_stream,
     direct_chat_node,
     executor_node,
+    get_max_rounds,
     planner_node,
-    router_node,
 )
 from agent.graph.state import AgentState
 from agent.graph.synthesizer_node import (
     _synth_via_llm_stream,
     synthesizer_node,
 )
+from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
 
+def _compact_history_entry(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """入口处压缩 history：根据 config 配置调用 compact_history。
+
+    未超 token 预算时零开销返回原 history；超预算时保留最近若干轮原文，
+    早轮用 LLM 总结成一条 system 摘要（借鉴 Codex compact.rs）。
+    """
+    if not history:
+        return history
+    settings = get_settings()
+    return compact_history(
+        history,
+        max_tokens=settings.HISTORY_MAX_TOKENS,
+        keep_recent_rounds=settings.HISTORY_KEEP_RECENT_ROUNDS,
+    )
+
+
 # ====== 条件边 ======
 
-def _route_by_intent(state: AgentState) -> str:
-    """根据意图路由：闲聊走 direct_chat，业务走 planner。"""
-    return "direct_chat" if state.get("intent") == "chitchat" else "planner"
+def _route_after_planner(state: AgentState) -> str:
+    """planner 后路由：第 1 轮无工具调用 → direct_chat（闲聊），否则 → executor。
+
+    借鉴 OpenAI / Cohere 主流方案：移除独立路由层，由 LLM 原生 Function
+    Calling 统一决策。模型不调工具即视为闲聊，调工具即视为业务。
+    第 2+ 轮无工具调用则由 _route_after_executor 路由到 synthesizer。
+    """
+    rounds = state.get("rounds", 0)
+    planned = state.get("planned_calls", [])
+    if rounds == 1 and not planned:
+        return "direct_chat"
+    return "executor"
 
 
 def _route_after_executor(state: AgentState) -> str:
-    """P4 改进后：基于 planner 设置的 should_continue 决策下一步。
-
-    替代原 _should_continue（基于 reflector 的 sufficient 字段）。
-    """
+    """基于 planner 设置的 should_continue 决策下一步。"""
     return "synthesizer" if not state.get("should_continue", False) else "planner"
 
 
 # ====== 构建图 ======
 
-def build_agent_graph():
+def build_agent_graph() -> CompiledStateGraph:
     """构建并编译 LangGraph。
 
-    P4 改进后拓扑（reflector 已合并到 planner）：
-        START → router ──(chitchat)──→ direct_chat → END
+    拓扑（移除独立路由层，由 planner 统一决策）：
+        START → planner ──(round=1 且无工具)──→ direct_chat → END
                   │
-                  └──(agent_task)──→ planner → executor
-                                          ↓
-                                   (should_continue?) ─是→ planner (循环)
-                                          ↓ 否
-                                    synthesizer → END
+                  └──(有工具)──→ executor
+                                    ↓
+                             (should_continue?) ─是→ planner (循环)
+                                    ↓ 否
+                              synthesizer → END
 
-    planner 同时输出 tool_calls + should_continue，省掉一次 LLM 调用。
+    借鉴 OpenAI Agents SDK / Cohere 主流方案：LLM 原生 Function Calling
+    统一决策，模型不调工具即视为闲聊，调工具即视为业务。省掉独立路由层
+    （原 semantic_router embedding 二分类与 planner 重复决策）。
     """
     graph = StateGraph(AgentState)
 
-    graph.add_node("router", router_node)
     graph.add_node("direct_chat", direct_chat_node)
     graph.add_node("planner", planner_node)
     graph.add_node("executor", executor_node)
     graph.add_node("synthesizer", synthesizer_node)
 
-    graph.add_edge(START, "router")
+    graph.add_edge(START, "planner")
+    # planner 后：第 1 轮无工具 → direct_chat（闲聊），否则 → executor
     graph.add_conditional_edges(
-        "router",
-        _route_by_intent,
-        {"direct_chat": "direct_chat", "planner": "planner"},
+        "planner",
+        _route_after_planner,
+        {"direct_chat": "direct_chat", "executor": "executor"},
     )
     graph.add_edge("direct_chat", END)
-    graph.add_edge("planner", "executor")
-    # P4：executor 后直接基于 should_continue 路由，不再经过 reflector
+    # executor 后基于 should_continue 路由
     graph.add_conditional_edges(
         "executor",
         _route_after_executor,
@@ -92,7 +118,7 @@ def build_agent_graph():
 
 # ====== 运行入口 ======
 
-def run_graph_agent(user_query: str, history: List[Dict[str, Any]] = None) -> Dict[str, Any]:
+def run_graph_agent(user_query: str, history: list[dict[str, Any]] = None) -> dict[str, Any]:
     """运行 LangGraph Agent（非流式，保留兼容）。
 
     Returns:
@@ -103,134 +129,239 @@ def run_graph_agent(user_query: str, history: List[Dict[str, Any]] = None) -> Di
           - actions: list（闲聊为空）
           - tool_calls: list
           - rounds: int
-          - intent: str  chitchat / agent_task
+          - intent: str  chitchat / agent_task（由 planner 决策，非独立路由）
     """
     app = build_agent_graph()
+    compacted_history = _compact_history_entry(history or [])
     initial_state: AgentState = {
         "user_query": user_query,
-        "history": history or [],
+        "history": compacted_history,
         "rounds": 0,
         "tool_results": {},
         "tool_calls": [],
     }
     final_state = app.invoke(initial_state, config={"recursion_limit": 20})
-    intent = final_state.get("intent", "agent_task")
-    is_chitchat = intent == "chitchat"
+    # intent 由 planner 间接决定：无工具调用走 direct_chat → chitchat；否则 agent_task
+    is_chitchat = not final_state.get("tool_calls") and final_state.get("rounds", 0) <= 1
+    intent = "chitchat" if is_chitchat else "agent_task"
     return {
         "final_answer": final_state.get("final_answer", ""),
-        "warning_level": "" if is_chitchat else final_state.get("warning_level", "IV"),
+        "warning_level": "" if is_chitchat else final_state.get("warning_level", ""),
         "reasoning": "" if is_chitchat else final_state.get("reasoning", ""),
         "actions": [] if is_chitchat else final_state.get("actions", []),
         "tool_calls": final_state.get("tool_calls", []),
+        "citations": [] if is_chitchat else final_state.get("citations", []),
         "rounds": final_state.get("rounds", 0),
         "intent": intent,
     }
 
 
-def run_graph_agent_stream(user_query: str, history: List[Dict[str, Any]] = None):
-    """运行 LangGraph Agent（流式生成器版本）。
+def _stream_chitchat_branch(
+    user_query: str,
+    history: list[dict[str, Any]],
+    skill_instructions: str = "",
+    cancel_event: threading.Event | None = None,
+):
+    """闲聊分支：流式 LLM 对话。
 
-    基于 LangGraph 的 stream() 方法，逐节点 yield 事件。
-    事件类型：
-      - {"type": "node_start", "node": "router"|"planner"|...}
-      - {"type": "intent", "intent": "chitchat"|"agent_task"}
-      - {"type": "tool_call", "tool": "get_hydrology", "arguments": {...}, "round": 1}
-      - {"type": "tool_result", "tool": "get_hydrology", "result": {...}, "round": 1}
-      - {"type": "round_end", "round": 1}
-      - {"type": "answer_delta", "content": "..."}  # 最终答案分块推送
-      - {"type": "done", "data": {完整响应数据}}
-      - {"type": "error", "message": "..."}
+    yields reasoning_step + answer_delta 事件，最终 yield done 事件。
+    """
+    yield {"type": "reasoning_step", "step": "direct_chat", "phase": "start",
+           "message": "正在生成回复...", "details": {}}
+    final_answer = ""
+    for ev in _direct_chat_stream(user_query, history or [], skill_instructions):
+        # 客户端已断开：停止消费 LLM 流，提前结束
+        if cancel_event is not None and cancel_event.is_set():
+            return
+        if ev["type"] == "answer_delta":
+            yield ev
+        elif ev["type"] == "synth_answer_full":
+            final_answer = ev["content"]
+    yield {"type": "reasoning_step", "step": "direct_chat", "phase": "done",
+           "message": "回复生成完成", "details": {}}
+    yield {
+        "type": "done",
+        "data": {
+            "answer": final_answer,
+            "warning_level": "",
+            "reasoning": "",
+            "actions": [],
+            "tool_calls": [],
+            "rounds": 0,
+            "intent": "chitchat",
+        },
+    }
+
+
+def _stream_planner_executor_loop(
+    state: AgentState,
+    user_query: str,
+    history: list[dict[str, Any]],
+    cancel_event: threading.Event | None = None,
+):
+    """planner → executor 循环，直到 should_continue=False。
+
+    第 1 轮 planner 返回空工具调用时，转入闲聊分支（借鉴 OpenAI / Cohere
+    主流方案：模型不调工具即视为闲聊）。
+
+    yields reasoning_step / tool_call / tool_result 事件。
+    返回 True 表示已走闲聊分支（调用方应终止），False 表示正常完成进 synthesizer。
+    """
+    while True:
+        # 客户端已断开：在轮次边界提前终止，不再发起后续 LLM/工具调用
+        if cancel_event is not None and cancel_event.is_set():
+            return True
+        round_num = state.get("rounds", 0) + 1
+        # ===== planner =====
+        yield {"type": "reasoning_step", "step": "planner", "phase": "start",
+               "message": f"第 {round_num} 轮规划：正在决策调用哪些工具...",
+               "details": {"round": round_num}}
+        planner_update = planner_node(state)
+        state.update(planner_update)
+        planned = state.get("planned_calls", [])
+
+        if not planned:
+            yield {"type": "reasoning_step", "step": "planner", "phase": "decision",
+                   "message": "无需调用工具，信息已充分",
+                   "details": {"round": round_num, "tools": []}}
+            # 第 1 轮无工具 → 闲聊分支；第 2+ 轮无工具 → 进 synthesizer
+            if round_num == 1:
+                yield from _stream_chitchat_branch(
+                    user_query, history, state.get("skill_instructions", ""),
+                    cancel_event,
+                )
+                return True
+            # 后续轮次无工具，信息已充分，结束循环进 synthesizer
+            break
+        else:
+            tool_names = [c.get("name", "") for c in planned]
+            yield {"type": "reasoning_step", "step": "planner", "phase": "decision",
+                   "message": f"决定调用工具：{', '.join(tool_names)}",
+                   "details": {"round": round_num, "tools": tool_names}}
+            # 推送 tool_call 事件
+            for call in planned:
+                yield {
+                    "type": "tool_call",
+                    "tool": call["name"],
+                    "arguments": call.get("arguments", {}),
+                    "round": round_num,
+                }
+
+        # ===== executor =====
+        yield {"type": "reasoning_step", "step": "executor", "phase": "start",
+               "message": f"执行 {len(planned)} 个工具...",
+               "details": {"round": round_num}}
+        prev_len = len(state.get("tool_calls", []))
+        executor_update = executor_node(state)
+        state.update(executor_update)
+        # 推送 tool_result 事件（增量）
+        new_calls = state.get("tool_calls", [])
+        for tc in new_calls[prev_len:]:
+            yield {
+                "type": "tool_result",
+                "tool": tc["tool_name"],
+                "result": tc.get("result", {}),
+                "error": tc.get("error", ""),
+                "round": tc.get("round", round_num),
+            }
+        yield {"type": "reasoning_step", "step": "executor", "phase": "done",
+               "message": f"工具执行完成（{len(new_calls) - prev_len} 个）",
+               "details": {"round": round_num}}
+
+        # planner 的 should_continue 决定是否继续循环
+        should_continue = state.get("should_continue", False)
+        if not should_continue:
+            max_rounds = get_max_rounds()
+            reason = "max_rounds" if state.get("rounds", 0) >= max_rounds else "info_sufficient"
+            msg = (f"已达最大轮次（{max_rounds}），强制结束循环" if reason == "max_rounds"
+                   else "信息已充分，开始综合研判")
+            yield {"type": "reasoning_step", "step": "planner", "phase": "done",
+                   "message": msg,
+                   "details": {"should_continue": False, "reason": reason,
+                               "round": state.get("rounds", 0)}}
+            break
+        else:
+            yield {"type": "reasoning_step", "step": "planner", "phase": "done",
+                   "message": "信息不足，继续调用工具",
+                   "details": {"should_continue": True, "round": state.get("rounds", 0)}}
+
+    return False
+
+
+def _stream_synthesizer_phase(
+    state: AgentState,
+    user_query: str,
+    cancel_event: threading.Event | None = None,
+):
+    """synthesizer 阶段：流式生成最终回答。
+
+    yields reasoning_step / synth_meta / answer_delta 事件。
+    返回 (synth_meta, final_answer)。
+    """
+    yield {"type": "reasoning_step", "step": "synthesizer", "phase": "start",
+           "message": "正在综合研判并生成回答...", "details": {}}
+    tool_results = state.get("tool_results", {})
+    history = state.get("history", [])
+    skill_instructions = state.get("skill_instructions", "")
+    synth_meta = None
+    final_answer = ""
+    for ev in _synth_via_llm_stream(user_query, tool_results, history, skill_instructions):
+        # 客户端已断开：停止消费 LLM token 流，提前结束
+        if cancel_event is not None and cancel_event.is_set():
+            return None, ""
+        if ev["type"] == "synth_meta":
+            synth_meta = ev["data"]
+            yield ev
+        elif ev["type"] == "answer_delta":
+            yield ev
+        elif ev["type"] == "synth_answer_full":
+            final_answer = ev["content"]
+
+    yield {"type": "reasoning_step", "step": "synthesizer", "phase": "done",
+           "message": "综合研判完成",
+           "details": {"warning_level": (synth_meta or {}).get("warning_level", "")}}
+    return synth_meta, final_answer
+
+
+def _maybe_trigger_reflection(state: AgentState, user_query: str, final_answer: str) -> None:
+    """自进化：在响应完成后异步触发反思循环（不阻塞响应发送）。
+
+    任何异常均捕获并降级为 debug 日志，确保不影响主流程。
+    同时把本次注入的记忆传给反思，评估注入有效性（效果闭环）。
     """
     try:
-        app = build_agent_graph()
-        initial_state: AgentState = {
-            "user_query": user_query,
-            "history": history or [],
-            "rounds": 0,
-            "tool_results": {},
-            "tool_calls": [],
-        }
-
-        final_state: Dict[str, Any] = {}
-        # 记录上一轮的 tool_calls 长度，用于增量推送
-        prev_tool_calls_len = 0
-
-        # LangGraph stream 模式：逐节点输出状态更新
-        for chunk in app.stream(
-            initial_state,
-            config={"recursion_limit": 20},
-            stream_mode="updates",
-        ):
-            # chunk 是 {node_name: state_update} 字典
-            for node_name, state_update in chunk.items():
-                if not isinstance(state_update, dict):
-                    continue
-                final_state.update(state_update)
-
-                yield {"type": "node_start", "node": node_name}
-
-                # router 节点：推送意图识别结果
-                if node_name == "router" and "intent" in state_update:
-                    yield {"type": "intent", "intent": state_update["intent"]}
-
-                # planner 节点：推送本轮规划的工具调用
-                if node_name == "planner" and "planned_calls" in state_update:
-                    round_num = state_update.get("rounds", 0)
-                    for call in state_update["planned_calls"]:
-                        yield {
-                            "type": "tool_call",
-                            "tool": call["name"],
-                            "arguments": call.get("arguments", {}),
-                            "round": round_num,
-                        }
-
-                # executor 节点：推送工具执行结果（增量）
-                if node_name == "executor":
-                    new_calls = state_update.get("tool_calls", [])
-                    for tc in new_calls[prev_tool_calls_len:]:
-                        yield {
-                            "type": "tool_result",
-                            "tool": tc["tool_name"],
-                            "result": tc.get("result", {}),
-                            "error": tc.get("error", ""),
-                            "round": tc.get("round", 1),
-                        }
-                    prev_tool_calls_len = len(new_calls)
-
-                # P4：不再有 reflector 节点，planner 的 should_continue 决定循环
-                # executor 后通过 _route_after_executor 直接路由到 synthesizer 或 planner
-
-        # 最终结果
-        intent = final_state.get("intent", "agent_task")
-        is_chitchat = intent == "chitchat"
-        final_answer = final_state.get("final_answer", "")
-
-        # 分块推送最终答案（模拟打字机效果，按句子/段落切分）
-        if final_answer:
-            # 按标点切分，保留标点
-            chunks = re.split(r"(?<=[。！？\n])", final_answer)
-            for c in chunks:
-                if c.strip():
-                    yield {"type": "answer_delta", "content": c}
-
-        yield {
-            "type": "done",
-            "data": {
-                "answer": final_answer,
-                "warning_level": "" if is_chitchat else final_state.get("warning_level", ""),
-                "reasoning": "" if is_chitchat else final_state.get("reasoning", ""),
-                "actions": [] if is_chitchat else final_state.get("actions", []),
-                "tool_calls": final_state.get("tool_calls", []),
-                "rounds": final_state.get("rounds", 0),
-                "intent": intent,
-            },
-        }
+        from agent.memory import run_reflection_async, should_reflect
+        from agent.memory.experience import get_injected_memories
+        tool_calls_state = state.get("tool_calls", [])
+        tool_errors = [tc.get("error", "") for tc in tool_calls_state if tc.get("error")]
+        trigger_reason = should_reflect(
+            user_query=user_query,
+            final_answer=final_answer,
+            tool_calls=tool_calls_state,
+            tool_errors=tool_errors,
+            rounds=state.get("rounds", 0),
+        )
+        if trigger_reason:
+            run_reflection_async(
+                user_query=user_query,
+                final_answer=final_answer,
+                tool_calls=tool_calls_state,
+                tool_errors=tool_errors,
+                rounds=state.get("rounds", 0),
+                trigger_reason=trigger_reason,
+                # 效果闭环：本次注入的记忆（planner 经验 + synthesizer 偏好）
+                # 在同一 worker 线程内记录，反思时评估是否需要降权
+                injected_memories=get_injected_memories(),
+            )
     except Exception as e:
-        logger.exception("[stream] Agent 流式运行失败")
-        yield {"type": "error", "message": str(e)}
+        logger.debug("[stream_v2] 反思触发失败（不影响响应）：%s", e)
 
 
-def run_graph_agent_stream_v2(user_query: str, history: List[Dict[str, Any]] = None):
+def run_graph_agent_stream_v2(
+    user_query: str,
+    history: list[dict[str, Any]] = None,
+    cancel_event: threading.Event | None = None,
+) -> Iterator[dict[str, Any]]:
     """流式 Agent（v2）：手动驱动状态机，支持推理过程可视化 + 真流式输出。
 
     借鉴 agent-service-toolkit（LangGraph 官方推荐模板，4.4k star）的做法：
@@ -243,13 +374,16 @@ def run_graph_agent_stream_v2(user_query: str, history: List[Dict[str, Any]] = N
     所以不使用 LangGraph 的 stream(messages) 模式，而是手动驱动状态机：
       1. 手动调用各节点函数（保留 LangGraph 图定义用于非流式兼容）
       2. 在节点前后推送 reasoning_step 事件（推理过程可视化）
-      3. synthesizer 用 _synth_via_llm_stream（细粒度切分 answer）
+      3. synthesizer 用 _synth_via_llm_stream（两阶段真流式：Phase1 metadata 非流式 + Phase2 answer stream=True）
       4. direct_chat 用 _direct_chat_stream（LLM stream=True 真 token 流式）
 
+    路由策略（借鉴 OpenAI / Cohere 主流方案）：
+      移除独立路由层，由 planner LLM 原生 Function Calling 统一决策。
+      第 1 轮 planner 返回空工具调用 → 闲聊分支；否则 → 业务分支。
+
     事件类型：
-      - {"type": "reasoning_step", "step": "router|planner|executor|reflector|synthesizer|direct_chat",
+      - {"type": "reasoning_step", "step": "planner|executor|synthesizer|direct_chat",
          "phase": "start|thinking|decision|done", "message": "...", "details": {...}}
-      - {"type": "intent", "intent": "chitchat"|"agent_task"}
       - {"type": "tool_call", "tool": "...", "arguments": {...}, "round": N}
       - {"type": "tool_result", "tool": "...", "result": {...}, "error": "", "round": N}
       - {"type": "synth_meta", "data": {warning_level, reasoning, actions}}  # 结构化结论
@@ -258,162 +392,43 @@ def run_graph_agent_stream_v2(user_query: str, history: List[Dict[str, Any]] = N
       - {"type": "error", "message": "..."}
     """
     try:
+        # 效果闭环：清空上一请求的注入追踪（thread-local，防止跨请求残留）
+        try:
+            from agent.memory.experience import clear_injected_tracking
+            clear_injected_tracking()
+        except Exception:
+            pass
+        compacted_history = _compact_history_entry(history or [])
         state: AgentState = {
             "user_query": user_query,
-            "history": history or [],
+            "history": compacted_history,
             "rounds": 0,
             "tool_results": {},
             "tool_calls": [],
         }
 
-        # ===== 1. 路由节点 =====
-        yield {"type": "reasoning_step", "step": "router", "phase": "start",
-               "message": "正在识别问题意图...", "details": {}}
-        router_update = router_node(state)
-        state.update(router_update)
-        intent = state.get("intent", "agent_task")
-        yield {"type": "intent", "intent": intent}
-        yield {"type": "reasoning_step", "step": "router", "phase": "done",
-               "message": f"识别为{'闲聊' if intent == 'chitchat' else '业务问题'}",
-               "details": {"intent": intent}}
-
-        # ===== 2a. 闲聊分支：流式 LLM 对话 =====
-        if intent == "chitchat":
-            yield {"type": "reasoning_step", "step": "direct_chat", "phase": "start",
-                   "message": "正在生成回复...", "details": {}}
-            final_answer = ""
-            for ev in _direct_chat_stream(user_query, history or []):
-                if ev["type"] == "answer_delta":
-                    yield ev
-                elif ev["type"] == "synth_answer_full":
-                    final_answer = ev["content"]
-            yield {"type": "reasoning_step", "step": "direct_chat", "phase": "done",
-                   "message": "回复生成完成", "details": {}}
-            yield {
-                "type": "done",
-                "data": {
-                    "answer": final_answer,
-                    "warning_level": "",
-                    "reasoning": "",
-                    "actions": [],
-                    "tool_calls": [],
-                    "rounds": 0,
-                    "intent": "chitchat",
-                },
-            }
+        # planner → executor 循环（第 1 轮空工具会自动转入闲聊分支）
+        went_chitchat = yield from _stream_planner_executor_loop(
+            state, user_query, compacted_history, cancel_event,
+        )
+        if went_chitchat:
             return
 
-        # ===== 2b. 业务分支：planner → executor → reflector 循环 =====
-        while True:
-            round_num = state.get("rounds", 0) + 1
-            # ===== planner =====
-            yield {"type": "reasoning_step", "step": "planner", "phase": "start",
-                   "message": f"第 {round_num} 轮规划：正在决策调用哪些工具...",
-                   "details": {"round": round_num}}
-            planner_update = planner_node(state)
-            state.update(planner_update)
-            planned = state.get("planned_calls", [])
+        # 客户端已断开：跳过 synthesizer 阶段（不再消耗 LLM token）
+        if cancel_event is not None and cancel_event.is_set():
+            return
 
-            if not planned:
-                yield {"type": "reasoning_step", "step": "planner", "phase": "decision",
-                       "message": "无需调用工具，信息已充分",
-                       "details": {"round": round_num, "tools": []}}
-            else:
-                tool_names = [c.get("name", "") for c in planned]
-                yield {"type": "reasoning_step", "step": "planner", "phase": "decision",
-                       "message": f"决定调用工具：{', '.join(tool_names)}",
-                       "details": {"round": round_num, "tools": tool_names}}
-                # 推送 tool_call 事件
-                for call in planned:
-                    yield {
-                        "type": "tool_call",
-                        "tool": call["name"],
-                        "arguments": call.get("arguments", {}),
-                        "round": round_num,
-                    }
+        # synthesizer：流式生成最终回答
+        synth_meta, final_answer = yield from _stream_synthesizer_phase(
+            state, user_query, cancel_event,
+        )
 
-            # ===== executor =====
-            if planned:
-                yield {"type": "reasoning_step", "step": "executor", "phase": "start",
-                       "message": f"执行 {len(planned)} 个工具...",
-                       "details": {"round": round_num}}
-                prev_len = len(state.get("tool_calls", []))
-                executor_update = executor_node(state)
-                state.update(executor_update)
-                # 推送 tool_result 事件（增量）
-                new_calls = state.get("tool_calls", [])
-                for tc in new_calls[prev_len:]:
-                    yield {
-                        "type": "tool_result",
-                        "tool": tc["tool_name"],
-                        "result": tc.get("result", {}),
-                        "error": tc.get("error", ""),
-                        "round": tc.get("round", round_num),
-                    }
-                yield {"type": "reasoning_step", "step": "executor", "phase": "done",
-                       "message": f"工具执行完成（{len(new_calls) - prev_len} 个）",
-                       "details": {"round": round_num}}
+        # 客户端断开导致的提前返回：不再产出 done 事件
+        if cancel_event is not None and cancel_event.is_set():
+            return
 
-            # ===== P4：planner 的 should_continue 已包含反思判断 =====
-            # 不再调用独立 reflector 节点，直接基于 should_continue 决定是否继续循环
-            should_continue = state.get("should_continue", False)
-            if not should_continue:
-                # 信息已充分或达到 MAX_ROUNDS，进入 synthesizer
-                reason = "max_rounds" if state.get("rounds", 0) >= MAX_ROUNDS else "info_sufficient"
-                msg = (f"已达最大轮次（{MAX_ROUNDS}），强制结束循环" if reason == "max_rounds"
-                       else "信息已充分，开始综合研判")
-                yield {"type": "reasoning_step", "step": "planner", "phase": "done",
-                       "message": msg,
-                       "details": {"should_continue": False, "reason": reason,
-                                   "round": state.get("rounds", 0)}}
-                break
-            else:
-                yield {"type": "reasoning_step", "step": "planner", "phase": "done",
-                       "message": "信息不足，继续调用工具",
-                       "details": {"should_continue": True, "round": state.get("rounds", 0)}}
-
-        # ===== synthesizer：流式生成最终回答 =====
-        yield {"type": "reasoning_step", "step": "synthesizer", "phase": "start",
-               "message": "正在综合研判并生成回答...", "details": {}}
-        tool_results = state.get("tool_results", {})
-        synth_meta = None
-        final_answer = ""
-        for ev in _synth_via_llm_stream(user_query, tool_results):
-            if ev["type"] == "synth_meta":
-                synth_meta = ev["data"]
-                yield ev
-            elif ev["type"] == "answer_delta":
-                yield ev
-            elif ev["type"] == "synth_answer_full":
-                final_answer = ev["content"]
-
-        yield {"type": "reasoning_step", "step": "synthesizer", "phase": "done",
-               "message": "综合研判完成",
-               "details": {"warning_level": (synth_meta or {}).get("warning_level", "")}}
-
-        # 自进化：在响应完成后异步触发反思循环（不阻塞响应发送）
-        try:
-            from agent.memory import should_reflect, run_reflection_async
-            tool_calls_state = state.get("tool_calls", [])
-            tool_errors = [tc.get("error", "") for tc in tool_calls_state if tc.get("error")]
-            trigger_reason = should_reflect(
-                user_query=user_query,
-                final_answer=final_answer,
-                tool_calls=tool_calls_state,
-                tool_errors=tool_errors,
-                rounds=state.get("rounds", 0),
-            )
-            if trigger_reason:
-                run_reflection_async(
-                    user_query=user_query,
-                    final_answer=final_answer,
-                    tool_calls=tool_calls_state,
-                    tool_errors=tool_errors,
-                    rounds=state.get("rounds", 0),
-                    trigger_reason=trigger_reason,
-                )
-        except Exception as e:
-            logger.debug("[stream_v2] 反思触发失败（不影响响应）：%s", e)
+        # 自进化：异步触发反思循环（不阻塞响应发送）
+        _maybe_trigger_reflection(state, user_query, final_answer)
 
         yield {
             "type": "done",
@@ -422,11 +437,17 @@ def run_graph_agent_stream_v2(user_query: str, history: List[Dict[str, Any]] = N
                 "warning_level": (synth_meta or {}).get("warning_level", ""),
                 "reasoning": (synth_meta or {}).get("reasoning", ""),
                 "actions": (synth_meta or {}).get("actions", []),
+                "citations": (synth_meta or {}).get("citations", []),
                 "tool_calls": state.get("tool_calls", []),
                 "rounds": state.get("rounds", 0),
                 "intent": "agent_task",
             },
         }
+    except LLMError as e:
+        # LLM 分类异常：保留 kind/status_code 传给前端（与非流式接口行为一致）
+        logger.warning("[stream_v2] LLM error: %s (kind=%s)", e, e.kind)
+        yield {"type": "error", "message": str(e), "kind": e.kind,
+               "status_code": e.status_code}
     except Exception as e:
         logger.exception("[stream_v2] Agent 流式运行失败")
         yield {"type": "error", "message": str(e)}

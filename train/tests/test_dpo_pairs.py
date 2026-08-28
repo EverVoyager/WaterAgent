@@ -5,10 +5,10 @@ from tempfile import TemporaryDirectory
 
 from train.data_gen.dpo_pairs import (
     DPOPair,
-    build_dpo_pair,
-    write_dpo_jsonl,
     _extract_final_answer,
     _extract_prompt,
+    build_dpo_pair,
+    write_dpo_jsonl,
 )
 
 

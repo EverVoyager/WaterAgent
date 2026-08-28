@@ -3,7 +3,7 @@ import json
 import logging
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -33,8 +33,8 @@ class AgentQueryRequest(BaseModel):
     """Agent 查询请求。"""
 
     query: str = Field(..., min_length=1, max_length=2000, description="用户问题")
-    system_prompt: Optional[str] = Field(None, description="自定义系统提示词（暂未使用，预留）")
-    history: List[ChatMessage] = Field(
+    system_prompt: str | None = Field(None, description="自定义系统提示词（暂未使用，预留）")
+    history: list[ChatMessage] = Field(
         default_factory=list, description="历史对话（不含当前问题）"
     )
 
@@ -43,10 +43,20 @@ class ToolCallInfo(BaseModel):
     """工具调用信息。"""
 
     tool_name: str
-    arguments: Dict[str, Any]
-    result: Dict[str, Any]
+    arguments: dict[str, Any]
+    result: dict[str, Any]
     error: str = ""
     round: int = 1
+
+
+class Citation(BaseModel):
+    """引用来源（仅联网搜索结果，已校验原文真实性）。"""
+
+    ref_id: int = Field(..., description="上下文编号，对应 answer 中的 [编号] 标记")
+    quote: str = Field(..., description="从搜索结果摘要中逐字摘录的片段")
+    source_type: str = Field("web_search", description="来源类型，目前固定为 web_search")
+    title: str = Field("", description="网页标题")
+    url: str = Field("", description="网页链接（可点击跳转）")
 
 
 class AgentQueryResponse(BaseModel):
@@ -55,9 +65,12 @@ class AgentQueryResponse(BaseModel):
     answer: str = Field(..., description="最终自然语言回答")
     warning_level: str = Field("", description="预警等级 I/II/III/IV；闲聊为空")
     reasoning: str = Field("", description="研判依据；闲聊为空")
-    actions: List[str] = Field(default_factory=list, description="应急措施列表")
-    tool_calls: List[ToolCallInfo] = Field(
+    actions: list[str] = Field(default_factory=list, description="应急措施列表")
+    tool_calls: list[ToolCallInfo] = Field(
         default_factory=list, description="工具调用链路"
+    )
+    citations: list[Citation] = Field(
+        default_factory=list, description="引用来源列表（已校验原文真实性）"
     )
     rounds: int = Field(0, description="实际执行的轮次")
     intent: str = Field("agent_task", description="意图：chitchat / agent_task")
@@ -96,6 +109,9 @@ def agent_query(req: AgentQueryRequest) -> AgentQueryResponse:
             )
             for tc in result["tool_calls"]
         ],
+        citations=[
+            Citation(**c) for c in result.get("citations", [])
+        ],
         rounds=result["rounds"],
         intent=result.get("intent", "agent_task"),
     )
@@ -114,19 +130,27 @@ def _sse_keepalive_comment() -> str:
 
 
 def _stream_generator(query: str, history: list):
-    """SSE 事件生成器（P5 加心跳保活）。
+    """SSE 事件生成器（P5 加心跳保活 + 断连协作式取消）。
 
     使用独立线程跑 Agent，主线程定期发心跳避免连接超时。
+    客户端断开时生成器被 Starlette 关闭（GeneratorExit），在 finally 中
+    set cancel_event 让 Agent 在轮次/token 流边界提前退出，避免浪费 LLM token。
     """
     # 用 queue 把 Agent 事件传到主线程
     import queue
-    event_queue: "queue.Queue[Any]" = queue.Queue()
+    event_queue: queue.Queue[Any] = queue.Queue()
     # 哨兵对象标记 Agent 结束
-    _SENTINEL = object()
+    _sentinel = object()
+    # 协作式取消标志：客户端断开后由 Agent 循环边界检查
+    cancel_event = threading.Event()
 
     def _agent_worker():
         try:
-            for event in run_graph_agent_stream_v2(user_query=query, history=history):
+            for event in run_graph_agent_stream_v2(
+                user_query=query, history=history, cancel_event=cancel_event,
+            ):
+                if cancel_event.is_set():
+                    break
                 event_queue.put(event)
         except LLMError as e:
             # P2：LLM 异常封装为 error 事件推给前端
@@ -137,7 +161,7 @@ def _stream_generator(query: str, history: list):
             logger.exception("[sse] 流式生成失败")
             event_queue.put({"type": "error", "message": str(e)})
         finally:
-            event_queue.put(_SENTINEL)
+            event_queue.put(_sentinel)
 
     worker_thread = threading.Thread(target=_agent_worker, daemon=True)
     worker_thread.start()
@@ -154,18 +178,19 @@ def _stream_generator(query: str, history: list):
                 last_emit = time.time()
                 continue
 
-            if item is _SENTINEL:
+            if item is _sentinel:
                 break
             yield _sse_event(item)
             last_emit = time.time()
     finally:
         if worker_thread.is_alive():
-            # 主线程退出时 worker 仍可能在跑，daemon=True 会随进程退出
-            logger.warning("[sse] stream ended before agent finished, worker still running")
+            # 生成器提前结束（客户端断开 / 异常）：通知 worker 在循环边界取消
+            cancel_event.set()
+            logger.info("[sse] stream ended before agent finished, cancelling worker")
 
 
 @router.post("/query/stream")
-def agent_query_stream(req: AgentQueryRequest):
+def agent_query_stream(req: AgentQueryRequest) -> StreamingResponse:
     """Agent 对话流式接口（SSE）。
 
     返回 text/event-stream，事件类型：

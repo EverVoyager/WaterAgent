@@ -5,8 +5,8 @@
 import httpx
 from openai import (
     APIConnectionError,
-    APITimeoutError,
     APIError,
+    APITimeoutError,
     RateLimitError,
 )
 

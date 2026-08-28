@@ -5,10 +5,14 @@
 
 训练侧扩展（Task 3）：新增可选 `overrides`/`seed` 参数，默认 None 走原逻辑；
 真实实现分支不受影响，overrides/seed 仅作用于 mock 回放。
+
+环境分级降级（P0-b）：
+- development：真实实现不可用时降级到 mock，方便本地无依赖开发
+- production：关键业务工具真实实现不可用时硬失败（raise），避免防汛决策基于模拟数据
 """
 import random
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict
+from typing import Any
 
 from agent.tools.schemas import (
     TOOL_PARAM_MODELS,
@@ -18,16 +22,14 @@ from agent.tools.schemas import (
     PredictRunoffParams,
     QueryGisTerrainParams,
     SearchRegulationParams,
+    WebSearchParams,
 )
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
+from agent.utils import LEVEL_DESCRIPTION
+from agent.utils import now_iso as _now_iso
 
 # ====== 各工具的 mock 实现 ======
 
-def _mock_get_weather(params: GetWeatherParams, overrides: dict | None = None) -> Dict[str, Any]:
+def _mock_get_weather(params: GetWeatherParams, overrides: dict | None = None) -> dict[str, Any]:
     """模拟天气查询：生成未来 N 小时降雨数据。"""
     series = []
     base_time = datetime.now(timezone.utc)
@@ -59,7 +61,7 @@ def _mock_get_weather(params: GetWeatherParams, overrides: dict | None = None) -
     return result
 
 
-def _mock_get_hydrology(params: GetHydrologyParams, overrides: dict | None = None) -> Dict[str, Any]:
+def _mock_get_hydrology(params: GetHydrologyParams, overrides: dict | None = None) -> dict[str, Any]:
     """模拟水文站实时水情。"""
     station_data = {
         "吴堡": {"base_level": 640.5, "base_flow": 1200},
@@ -83,7 +85,7 @@ def _mock_get_hydrology(params: GetHydrologyParams, overrides: dict | None = Non
     return result
 
 
-def _mock_predict_runoff(params: PredictRunoffParams, overrides: dict | None = None) -> Dict[str, Any]:
+def _mock_predict_runoff(params: PredictRunoffParams, overrides: dict | None = None) -> dict[str, Any]:
     """模拟径流流量预测 API 返回。
 
     overrides 特殊处理：peak_flow_m3_s 需在 series 生成前生效（驱动曲线形状），
@@ -116,7 +118,7 @@ def _mock_predict_runoff(params: PredictRunoffParams, overrides: dict | None = N
     return result
 
 
-def _mock_query_gis_terrain(params: QueryGisTerrainParams, overrides: dict | None = None) -> Dict[str, Any]:
+def _mock_query_gis_terrain(params: QueryGisTerrainParams, overrides: dict | None = None) -> dict[str, Any]:
     """模拟 GIS 地形分析。"""
     result = {
         "bbox": params.bbox or "110.7,37.4,111.2,37.8",  # 默认吴堡附近
@@ -145,7 +147,7 @@ def _mock_query_gis_terrain(params: QueryGisTerrainParams, overrides: dict | Non
     return result
 
 
-def _mock_search_regulation(params: SearchRegulationParams, overrides: dict | None = None) -> Dict[str, Any]:
+def _mock_search_regulation(params: SearchRegulationParams, overrides: dict | None = None) -> dict[str, Any]:
     """模拟法规检索。"""
     docs = [
         {
@@ -190,14 +192,41 @@ def _mock_search_regulation(params: SearchRegulationParams, overrides: dict | No
     return result
 
 
-def _mock_generate_plan(params: GeneratePlanParams, overrides: dict | None = None) -> Dict[str, Any]:
-    """模拟生成应急预案。"""
-    level_desc = {
-        "I": "Ⅰ级（红色）特别重大",
-        "II": "Ⅱ级（橙色）重大",
-        "III": "Ⅲ级（黄色）较大",
-        "IV": "Ⅳ级（蓝色）一般",
+def _mock_web_search(params: WebSearchParams, overrides: dict | None = None) -> dict[str, Any]:
+    """模拟联网搜索。"""
+    mock_results = [
+        {
+            "title": "黄河水利委员会最新汛情通报",
+            "snippet": "据黄河水利委员会通报，黄河中游吴堡水文站流量持续监测中，当前水情平稳，请关注官方渠道获取最新数据。",
+            "url": "https://www.yrcc.gov.cn/news/flood_report.html",
+            "score": 0.92,
+        },
+        {
+            "title": "山西省防汛抗旱应急预案（2024修订）",
+            "snippet": "山西省人民政府发布的防汛抗旱应急预案，明确了各级预警等级的启动条件和响应措施。",
+            "url": "https://www.shanxi.gov.cn/zfxxgk/emergency_plan.html",
+            "score": 0.88,
+        },
+        {
+            "title": "吕梁市防汛指挥部署最新动态",
+            "snippet": "吕梁市防汛抗旱指挥部部署当前防汛工作，要求沿河各县加强巡查值守。",
+            "url": "https://www.lvliang.gov.cn/news/flood_dispatch.html",
+            "score": 0.85,
+        },
+    ]
+    result = {
+        "query": params.query,
+        "results": mock_results[: params.max_results],
+        "result_count": min(params.max_results, len(mock_results)),
+        "searched_at": _now_iso(),
     }
+    if overrides:
+        result.update(overrides)
+    return result
+
+
+def _mock_generate_plan(params: GeneratePlanParams, overrides: dict | None = None) -> dict[str, Any]:
+    """模拟生成应急预案。"""
     actions_by_level = {
         "I": [
             "立即启动Ⅰ级应急响应，市防指进入战时状态",
@@ -223,7 +252,7 @@ def _mock_generate_plan(params: GeneratePlanParams, overrides: dict | None = Non
     }
     result = {
         "warning_level": params.warning_level,
-        "level_description": level_desc[params.warning_level],
+        "level_description": LEVEL_DESCRIPTION[params.warning_level],
         "affected_area": params.affected_area,
         "population_at_risk": params.population_at_risk,
         "actions": actions_by_level[params.warning_level],
@@ -238,26 +267,47 @@ def _mock_generate_plan(params: GeneratePlanParams, overrides: dict | None = Non
 
 # ====== 执行器入口 ======
 
+# list_skills 透传占位：无外部依赖，直接走 real_executor（不降级 mock）
+_PASSTHROUGH_TOOLS = {"list_skills"}
+
+
 _MOCK_IMPLEMENTATIONS = {
     "get_weather": _mock_get_weather,
     "get_hydrology": _mock_get_hydrology,
     "predict_runoff": _mock_predict_runoff,
     "query_gis_terrain": _mock_query_gis_terrain,
     "search_regulation": _mock_search_regulation,
+    "web_search": _mock_web_search,
     "generate_plan": _mock_generate_plan,
 }
+
+# 关键业务工具：生产环境真实实现不可用时硬失败，不降级到 mock。
+# 防汛决策不能基于模拟数据——返回 mock 水情/法规/预案会误导指挥决策。
+_CRITICAL_TOOLS = set(_MOCK_IMPLEMENTATIONS.keys())
+
+
+def _should_hard_fail_on_real_failure(tool_name: str) -> bool:
+    """生产环境下关键业务工具真实实现不可用时应硬失败。
+
+    development 环境：始终返回 False（降级到 mock，方便本地无依赖开发）
+    production 环境 + 关键工具：返回 True（raise，错误直传前端）
+    """
+    from app.core.config import get_settings
+    return get_settings().is_production and tool_name in _CRITICAL_TOOLS
 
 
 def execute_tool(
     tool_name: str,
-    arguments: Dict[str, Any],
-    overrides: Dict[str, Any] | None = None,
+    arguments: dict[str, Any],
+    overrides: dict[str, Any] | None = None,
     seed: int | None = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """统一工具执行入口。
 
     优先调用 real_executor 中的真实实现（如 RAG 法规检索），
-    未覆盖或索引未就绪时回退到 mock 实现。
+    未覆盖或索引未就绪时按环境分级处理：
+    - development：降级到 mock 实现
+    - production：关键业务工具硬失败（raise），错误直传前端
 
     Args:
         tool_name: 工具名称
@@ -270,7 +320,13 @@ def execute_tool(
 
     Raises:
         ValueError: 工具名未知或入参不合法
+        RuntimeError: production 环境关键工具真实实现不可用（依赖未就绪等）
     """
+    # 透传工具（如 list_skills）无 mock 实现，直接走 real_executor
+    if tool_name in _PASSTHROUGH_TOOLS:
+        from agent.tools.real_executor import real_execute_tool
+        return real_execute_tool(tool_name, arguments)
+
     if tool_name not in _MOCK_IMPLEMENTATIONS:
         raise ValueError(f"Unknown tool: {tool_name}")
 
@@ -289,12 +345,16 @@ def execute_tool(
             if not result.get("__not_implemented__"):
                 return result
         except RuntimeError as e:
-            # 真实实现依赖未就绪（如 FAISS 索引未构建），降级到 mock
+            # 真实实现依赖未就绪（如 FAISS 索引未构建）
+            if _should_hard_fail_on_real_failure(tool_name):
+                raise
             import logging
             logging.getLogger(__name__).warning(
                 "[executor] %s 真实实现不可用，降级到 mock: %s", tool_name, e,
             )
         except Exception as e:
+            if _should_hard_fail_on_real_failure(tool_name):
+                raise
             import logging
             logging.getLogger(__name__).exception(
                 "[executor] %s 真实实现异常，降级到 mock: %s", tool_name, e,

@@ -4,7 +4,6 @@
 所有向量都做 L2 归一化，便于用内积（IndexFlatIP）直接得到余弦相似度。
 """
 import logging
-from typing import List, Optional
 
 import numpy as np
 
@@ -27,7 +26,7 @@ def _l2_normalize(vecs: np.ndarray) -> np.ndarray:
     return vecs / norms
 
 
-def _embed_batch(texts: List[str]) -> List[List[float]]:
+def _embed_batch(texts: list[str]) -> list[list[float]]:
     """调用一次 embedding API（最多 10 条）。"""
     settings = get_llm_config()
     client = get_llm_client()
@@ -40,7 +39,7 @@ def _embed_batch(texts: List[str]) -> List[List[float]]:
     return [d.embedding for d in sorted_data]
 
 
-def embed_texts(texts: List[str]) -> Optional[np.ndarray]:
+def embed_texts(texts: list[str]) -> np.ndarray | None:
     """批量 embedding，返回 L2 归一化后的 numpy 数组 (N, 1024)。
 
     失败时返回 None（由调用方决定降级策略）。
@@ -48,7 +47,7 @@ def embed_texts(texts: List[str]) -> Optional[np.ndarray]:
     if not texts:
         return np.zeros((0, EMBEDDING_DIM), dtype=np.float32)
 
-    all_vecs: List[List[float]] = []
+    all_vecs: list[list[float]] = []
     for i in range(0, len(texts), BATCH_SIZE):
         batch = texts[i : i + BATCH_SIZE]
         try:
@@ -62,7 +61,7 @@ def embed_texts(texts: List[str]) -> Optional[np.ndarray]:
     return _l2_normalize(arr)
 
 
-def embed_query(query: str) -> Optional[np.ndarray]:
+def embed_query(query: str) -> np.ndarray | None:
     """单条 query embedding，返回 L2 归一化后的 (1024,) 向量。"""
     arr = embed_texts([query])
     if arr is None or arr.shape[0] == 0:

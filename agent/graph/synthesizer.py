@@ -3,13 +3,18 @@
 阶段 C 用规则化的方式做综合研判，确保即使 LLM 失败也能给出可解释的等级。
 后续阶段 H 的 GRPO 训练会基于此规则构造 reward。
 """
-from typing import Any, Dict, Tuple
+from typing import Any
+
+from agent.utils import (  # noqa: F401（LEVEL_DESCRIPTION 供测试 re-export）
+    LEVEL_DESCRIPTION,
+    WARNING_THRESHOLDS,
+)
 
 
-def _extract_flow(tool_results: Dict[str, Any]) -> float:
+def _extract_flow(tool_results: dict[str, Any]) -> float:
     """提取最大流量 m³/s。"""
     max_flow = 0.0
-    for key, val in tool_results.items():
+    for _, val in tool_results.items():
         if not isinstance(val, dict):
             continue
         if "flow_m3_s" in val:
@@ -24,10 +29,10 @@ def _extract_flow(tool_results: Dict[str, Any]) -> float:
     return max_flow
 
 
-def _extract_rain(tool_results: Dict[str, Any]) -> float:
+def _extract_rain(tool_results: dict[str, Any]) -> float:
     """提取最大累计降雨量 mm。"""
     max_rain = 0.0
-    for key, val in tool_results.items():
+    for _, val in tool_results.items():
         if not isinstance(val, dict):
             continue
         if "total_rainfall_mm" in val:
@@ -37,9 +42,9 @@ def _extract_rain(tool_results: Dict[str, Any]) -> float:
     return max_rain
 
 
-def _extract_water_level_status(tool_results: Dict[str, Any]) -> str:
+def _extract_water_level_status(tool_results: dict[str, Any]) -> str:
     """判断水位状态：normal / warning / guaranteed。"""
-    for key, val in tool_results.items():
+    for _, val in tool_results.items():
         if not isinstance(val, dict):
             continue
         level = val.get("water_level_m")
@@ -55,7 +60,7 @@ def _extract_water_level_status(tool_results: Dict[str, Any]) -> str:
     return "unknown"
 
 
-def compute_warning_level(tool_results: Dict[str, Any]) -> Tuple[str, str]:
+def compute_warning_level(tool_results: dict[str, Any]) -> tuple[str, str]:
     """根据工具结果综合计算预警等级。
 
     Returns:
@@ -73,14 +78,21 @@ def compute_warning_level(tool_results: Dict[str, Any]) -> Tuple[str, str]:
     if level_status != "unknown":
         reasons.append(f"水位状态 {level_status}")
 
-    # Ⅰ级：流量≥5000 / 水位超保证 / 24h降雨>100
-    if flow >= 5000 or level_status == "guaranteed" or rain > 100:
+    # 阈值统一引用 WARNING_THRESHOLDS，避免多处硬编码不一致
+    f1 = WARNING_THRESHOLDS["flow_level1"]
+    f2 = WARNING_THRESHOLDS["flow_level2"]
+    f3 = WARNING_THRESHOLDS["flow_level3"]
+    r1 = WARNING_THRESHOLDS["rain_level1"]
+    r2 = WARNING_THRESHOLDS["rain_level2"]
+
+    # Ⅰ级：流量≥f1 / 水位超保证 / 24h降雨>r1
+    if flow >= f1 or level_status == "guaranteed" or rain > r1:
         return "I", "达到Ⅰ级（红色）预警标准：" + "，".join(reasons)
-    # Ⅱ级：流量 3000-5000 / 水位超警戒 / 24h降雨 50-100
-    if 3000 <= flow < 5000 or level_status == "warning" or 50 <= rain <= 100:
+    # Ⅱ级：流量 f2-f1 / 水位超警戒 / 24h降雨 r2-r1
+    if f2 <= flow < f1 or level_status == "warning" or r2 <= rain <= r1:
         return "II", "达到Ⅱ级（橙色）预警标准：" + "，".join(reasons)
-    # Ⅲ级：流量 2000-3000 / 水位接近警戒
-    if 2000 <= flow < 3000:
+    # Ⅲ级：流量 f3-f2 / 水位接近警戒
+    if f3 <= flow < f2:
         return "III", "达到Ⅲ级（黄色）预警标准：" + "，".join(reasons)
     # Ⅳ级：其他
     return "IV", "当前水情平稳，维持Ⅳ级（蓝色）一般预警：" + "，".join(reasons) if reasons else "暂无足够数据，默认Ⅳ级"
@@ -116,11 +128,3 @@ def get_actions_for_level(level: str, area: str = "吕梁市") -> list:
         ],
     }
     return actions.get(level, actions["IV"])
-
-
-LEVEL_DESCRIPTION = {
-    "I": "Ⅰ级（红色）特别重大",
-    "II": "Ⅱ级（橙色）重大",
-    "III": "Ⅲ级（黄色）较大",
-    "IV": "Ⅳ级（蓝色）一般",
-}

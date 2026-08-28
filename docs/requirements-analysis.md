@@ -54,16 +54,16 @@
 
 | 模块 | 位置 | 能力 |
 |---|---|---|
-| 执行链路 | `agent/graph/` | LangGraph 5 节点状态机：router → planner → executor → synthesizer（+ direct_chat 闲聊路径） |
-| 工具层 | `agent/tools/` | 6 个工具：get_weather / get_hydrology / predict_runoff / query_gis_terrain / search_regulation / generate_plan，Pydantic schema + OpenAI tools 导出 |
+| 执行链路 | `agent/graph/` | LangGraph 4 节点状态机：planner → executor → synthesizer（+ direct_chat 闲聊路径），planner 原生 Function Calling 统一路由 |
+| 工具层 | `agent/tools/` | 8 个工具：get_weather / get_hydrology / predict_runoff / query_gis_terrain / search_regulation / generate_plan / web_search / list_skills（元工具），Pydantic schema + OpenAI tools 导出 |
 | 规则引擎 | `agent/graph/synthesizer.py` | 基于流量/降雨/水位状态计算 I-IV 级预警，输出标准应急措施（GRPO 奖励的规则来源） |
 | 径流模型 | `agent/hydrology/scs_cn.py` | SCS-CN 降雨-径流预测 |
 | GIS 分析 | `agent/gis/` | DEM 加载、坡度/河床断面/淹没分析 |
 | 法规 RAG | `agent/rag/` + Qdrant | 5 部真实法规向量检索（防洪法/防汛条例/黄河水量调度/山西预案/黄河预案） |
-| 后端 | `backend/app/` | FastAPI + SSE 流式 + 限流 + 结构化日志 + LangFuse 追踪 |
-| 前端 | `frontend/` | Vue 3 + Element Plus，SSE 对话界面 |
-| 记忆 | `agent/memory/` | 经验检索注入（成功工具调用模式复用） |
-| 测试/CI | `backend/tests/` + `.github/workflows/ci.yml` | 90 个单测、ruff、前端构建 |
+| 后端 | `backend/app/` | FastAPI + SSE 流式 + 限流 + 结构化日志 |
+| 前端 | `frontend/` | Vue 3 + TypeScript（无 UI 库，自写组件），SSE 对话界面 |
+| 记忆 | `agent/memory/` | 自进化三层记忆（长期/技能/反思），经验检索注入 + Curator 定期治理 |
+| 测试/CI | `backend/tests/` + `.github/workflows/ci.yml` | 400+ 单测、ruff、前端构建 |
 
 ### 2.2 缺口（本期交付）
 

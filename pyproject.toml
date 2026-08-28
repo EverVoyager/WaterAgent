@@ -87,6 +87,15 @@ ignore = [
 "__init__.py" = ["F401"]  # __init__.py 允许未使用 import（用于 re-export）
 "tests/*" = ["B011"]      # 测试代码允许 assert False
 "backend/build_*.py" = ["N999"]  # 构建脚本允许非标准模块名
+# 以下文件先做 sys.path 引导再 import（双根结构：agent/ 在根、app/ 在 backend），E402 是有意为之
+"backend/app/main.py" = ["E402"]
+"backend/cleanup_memories.py" = ["E402"]
+"backend/init_memory_db.py" = ["E402"]
+"backend/tests/conftest.py" = ["E402"]
+"train/data_gen/convert_to_llamafactory.py" = ["E402"]
+"train/tests/conftest.py" = ["E402"]
+# createdAt/updatedAt 是与前端约定的 API 契约字段，保持 camelCase
+"backend/app/api/sessions.py" = ["N815"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["agent", "app", "backend", "train"]

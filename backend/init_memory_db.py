@@ -23,8 +23,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(BACKEND_DIR))
 
 import pymysql
-from app.core.config import get_settings
 
+from app.core.config import get_settings
 
 _CREATE_DB_SQL = "CREATE DATABASE IF NOT EXISTS `{db}` DEFAULT CHARSET utf8mb4 COLLATE utf8mb4_unicode_ci"
 

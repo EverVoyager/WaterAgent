@@ -14,7 +14,6 @@ from agent.hydrology.scs_cn import (
     predict_runoff_scs,
 )
 
-
 # ============ compute_runoff_depth ============
 
 class TestComputeRunoffDepth:
@@ -196,7 +195,7 @@ class TestPredictRunoffScs:
         """STATION_BASIN 应包含吴堡和龙门两站。"""
         assert "吴堡" in STATION_BASIN
         assert "龙门" in STATION_BASIN
-        for name, params in STATION_BASIN.items():
+        for _name, params in STATION_BASIN.items():
             assert "area_km2" in params
             assert "effective_area_km2" in params
             assert "cn" in params

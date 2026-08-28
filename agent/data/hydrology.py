@@ -18,11 +18,11 @@
 import logging
 import re
 import time
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import requests
 
+from agent.utils import now_iso as _now_iso
 from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -49,11 +49,7 @@ STATION_PARAMS = {
 }
 
 # 缓存：{cache_key: (fetched_at, data)}
-_cache: Dict[str, tuple[float, Dict[str, Any]]] = {}
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
 def _fetch_url(url: str, timeout: int = 10) -> str:
@@ -83,7 +79,7 @@ def _find_latest_yellow_river_article(list_url: str) -> tuple[str, str]:
     return candidates[0]
 
 
-def _parse_hydro_table(article_url: str) -> List[Dict[str, str]]:
+def _parse_hydro_table(article_url: str) -> list[dict[str, str]]:
     """解析文章中的水文站表格。"""
     html = _fetch_url(article_url)
     table_match = re.search(r"<table[^>]*>(.*?)</table>", html, re.S)
@@ -106,7 +102,7 @@ def _parse_hydro_table(article_url: str) -> List[Dict[str, str]]:
     return results
 
 
-def _parse_float(s: str) -> Optional[float]:
+def _parse_float(s: str) -> float | None:
     """安全解析浮点。"""
     s = re.sub(r"[^\d.]", "", s)
     if not s:
@@ -117,7 +113,93 @@ def _parse_float(s: str) -> Optional[float]:
         return None
 
 
-def fetch_hydrology(station: str, metric: str = "both") -> Dict[str, Any]:
+def _get_cached_hydrology(
+    cache_key: str,
+    now: float,
+    ttl: int,
+    metric: str,
+) -> dict[str, Any] | None:
+    """检查缓存，命中则返回过滤后的数据，否则返回 None。"""
+    if cache_key not in _cache:
+        return None
+    cached_at, cached_data = _cache[cache_key]
+    if now - cached_at >= ttl:
+        return None
+    logger.debug("[hydrology] 命中缓存 %s", cache_key)
+    return _filter_metric(cached_data, metric)
+
+
+def _fetch_raw_station_record(
+    station: str,
+    source_url: str,
+) -> tuple[dict[str, str], str]:
+    """抓取数据源列表页 + 详情页，返回目标站点原始记录与文章标题。
+
+    Raises:
+        RuntimeError: 数据源访问/解析失败或站点不存在
+    """
+    try:
+        article_url, article_title = _find_latest_yellow_river_article(source_url)
+        logger.info("[hydrology] 抓取文章: %s", article_title)
+        records = _parse_hydro_table(article_url)
+    except requests.RequestException as e:
+        logger.exception("[hydrology] 数据源访问失败")
+        raise RuntimeError(f"水文数据源访问失败：{e}") from e
+    except (RuntimeError, ValueError) as e:
+        logger.exception("[hydrology] 数据解析失败")
+        raise RuntimeError(f"水文数据解析失败：{e}") from e
+
+    target = next((r for r in records if r["station"] == station), None)
+    if not target:
+        raise RuntimeError(
+            f"数据源未找到站点 {station}（数据源共 {len(records)} 条记录，"
+            f"可用站点：{[r['station'] for r in records][:10]}）"
+        )
+    return target, article_title
+
+
+def _build_hydrology_result(
+    station: str,
+    target: dict[str, str],
+    article_title: str,
+) -> dict[str, Any]:
+    """根据原始站点记录构建标准化结果 dict。
+
+    Raises:
+        RuntimeError: 水位和流量均解析失败
+    """
+    water_level = _parse_float(target.get("water_level", ""))
+    flow = _parse_float(target.get("flow", ""))
+    params = STATION_PARAMS[station]
+
+    if water_level is None and flow is None:
+        raise RuntimeError(f"站点 {station} 数据解析失败: {target}")
+
+    result: dict[str, Any] = {
+        "station": station,
+        "river": params["river"],
+        "observed_time": target.get("time", ""),
+        "fetched_at": _now_iso(),
+        "source": "qqjjsj_realtime",
+        "article_title": article_title,
+    }
+
+    if water_level is not None:
+        result["water_level_m"] = round(water_level, 2)
+        result["warning_level_m"] = params["warning_level_m"]
+        result["guaranteed_level_m"] = params["guaranteed_level_m"]
+        # 超警幅度（正=超警）
+        result["above_warning_m"] = round(water_level - params["warning_level_m"], 2)
+
+    if flow is not None:
+        result["flow_m3_s"] = round(flow, 0)
+        result["warning_flow_m3_s"] = params["warning_flow_m3_s"]
+        result["above_warning_flow_m3_s"] = round(flow - params["warning_flow_m3_s"], 0)
+
+    return result
+
+
+def fetch_hydrology(station: str, metric: str = "both") -> dict[str, Any]:
     """查询水文站实时水情。
 
     Args:
@@ -148,67 +230,23 @@ def fetch_hydrology(station: str, metric: str = "both") -> Dict[str, Any]:
     cache_key = f"hydro:{station}"
     now = time.time()
 
-    # 检查缓存
-    if cache_key in _cache:
-        cached_at, cached_data = _cache[cache_key]
-        if now - cached_at < settings.HYDRO_CACHE_TTL:
-            logger.debug("[hydrology] 命中缓存 %s", cache_key)
-            return _filter_metric(cached_data, metric)
+    # 1. 检查缓存
+    cached = _get_cached_hydrology(cache_key, now, settings.HYDRO_CACHE_TTL, metric)
+    if cached is not None:
+        return cached
 
-    # 抓列表 + 详情
-    try:
-        article_url, article_title = _find_latest_yellow_river_article(settings.HYDRO_SOURCE_URL)
-        logger.info("[hydrology] 抓取文章: %s", article_title)
-        records = _parse_hydro_table(article_url)
-    except requests.RequestException as e:
-        logger.exception("[hydrology] 数据源访问失败")
-        raise RuntimeError(f"水文数据源访问失败：{e}") from e
-    except (RuntimeError, ValueError) as e:
-        logger.exception("[hydrology] 数据解析失败")
-        raise RuntimeError(f"水文数据解析失败：{e}") from e
+    # 2. 抓取数据源 + 定位目标站点
+    target, article_title = _fetch_raw_station_record(station, settings.HYDRO_SOURCE_URL)
 
-    # 过滤目标站点
-    target = next((r for r in records if r["station"] == station), None)
-    if not target:
-        raise RuntimeError(
-            f"数据源未找到站点 {station}（数据源共 {len(records)} 条记录，"
-            f"可用站点：{[r['station'] for r in records][:10]}）"
-        )
+    # 3. 构建标准化结果
+    result = _build_hydrology_result(station, target, article_title)
 
-    water_level = _parse_float(target.get("water_level", ""))
-    flow = _parse_float(target.get("flow", ""))
-    params = STATION_PARAMS[station]
-
-    if water_level is None and flow is None:
-        raise RuntimeError(f"站点 {station} 数据解析失败: {target}")
-
-    result: Dict[str, Any] = {
-        "station": station,
-        "river": params["river"],
-        "observed_time": target.get("time", ""),
-        "fetched_at": _now_iso(),
-        "source": "qqjjsj_realtime",
-        "article_title": article_title,
-    }
-
-    if water_level is not None:
-        result["water_level_m"] = round(water_level, 2)
-        result["warning_level_m"] = params["warning_level_m"]
-        result["guaranteed_level_m"] = params["guaranteed_level_m"]
-        # 超警幅度（正=超警）
-        result["above_warning_m"] = round(water_level - params["warning_level_m"], 2)
-
-    if flow is not None:
-        result["flow_m3_s"] = round(flow, 0)
-        result["warning_flow_m3_s"] = params["warning_flow_m3_s"]
-        result["above_warning_flow_m3_s"] = round(flow - params["warning_flow_m3_s"], 0)
-
-    # 写入缓存
+    # 4. 写入缓存并按 metric 过滤返回
     _cache[cache_key] = (now, result)
     return _filter_metric(result, metric)
 
 
-def _filter_metric(data: Dict[str, Any], metric: str) -> Dict[str, Any]:
+def _filter_metric(data: dict[str, Any], metric: str) -> dict[str, Any]:
     """按 metric 过滤返回字段。"""
     if metric == "water_level":
         return {k: v for k, v in data.items() if "flow" not in k.lower() or k == "warning_flow_m3_s"}

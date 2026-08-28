@@ -6,8 +6,8 @@ import httpx
 from openai import OpenAI
 from qdrant_client import QdrantClient
 
+from agent.utils import WARNING_THRESHOLDS
 from app.core.config import get_settings
-
 
 # Qwen3 思考内容剥离：本地微调模型在 nothink 模板下仍可能输出 <think>...</think>
 # 后端统一剥离，避免思考内容泄漏到前端 / 干扰下游节点解析
@@ -23,6 +23,22 @@ def strip_think(text: str) -> str:
     if not text:
         return text
     return _THINK_PATTERN.sub("", text).lstrip("\n")
+
+
+def extract_content(msg) -> str:
+    """从 LLM 响应的 message 对象中提取文本内容。
+
+    仅取 message.content，不回退到 reasoning_content。
+
+    主流方案（OpenAI / LangChain / DeepSeek / browser-use）均将推理过程与答案
+    物理分离：reasoning_content 是推理模型的内部思考链，可能包含系统提示词、
+    中间推理等不应暴露给用户的内容。将其回退为 content 会导致思考链泄漏到
+    前端（曾导致 direct_chat 把完整推理过程当作答案返回的 bug）。
+
+    content 为空时返回空字符串，由调用方决定是否抛错。
+    """
+    content = (getattr(msg, "content", None) or "").strip()
+    return strip_think(content)
 
 
 # 不同节点的 LLM 调用超时配置（秒）
@@ -82,6 +98,9 @@ def get_qdrant_config() -> dict:
 
 def get_default_system_prompt() -> str:
     """默认系统提示词。"""
+    f1 = WARNING_THRESHOLDS["flow_level1"]
+    f2 = WARNING_THRESHOLDS["flow_level2"]
+    f3 = WARNING_THRESHOLDS["flow_level3"]
     return (
         "你是黄河吕梁段防汛预警智能体。你的职责是根据用户问题，"
         "调用合适的工具获取天气、水情、径流预测、GIS 地形、法规政策等信息，"
@@ -90,6 +109,6 @@ def get_default_system_prompt() -> str:
         "1. 一次可以调用多个工具，但每次只调用最相关的 1-3 个；\n"
         "2. 工具调用失败时，应说明原因并基于已有信息进行研判；\n"
         "3. 最终回答必须包含：预警等级（Ⅰ/Ⅱ/Ⅲ/Ⅳ）、研判依据、具体应急措施；\n"
-        "4. 预警等级参考标准：流量 ≥ 5000m³/s 或水位超保证水位 → Ⅰ级；"
-        "3000-5000m³/s 或超警戒水位 → Ⅱ级；2000-3000m³/s → Ⅲ级；其他 → Ⅳ级。"
+        f"4. 预警等级参考标准：流量 ≥ {f1}m³/s 或水位超保证水位 → Ⅰ级；"
+        f"{f2}-{f1}m³/s 或超警戒水位 → Ⅱ级；{f3}-{f2}m³/s → Ⅲ级；其他 → Ⅳ级。"
     )

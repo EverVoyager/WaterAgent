@@ -28,7 +28,7 @@
       │ 合成轨迹                   │ 前端 Vue ──SSE──▶ FastAPI ──▶ LangGraph  │
       ▼                           │                          │  planner FC  │
 ┌───────────┐   ┌───────────┐    │                          ▼              │
-│ 场景生成器 │──▶│ Hermes 数据集│   │                     6 工具执行层          │
+│ 场景生成器 │──▶│ Hermes 数据集│   │                     8 工具执行层          │
 └───────────┘   └─────┬─────┘    └──────────────▲───────────────────────────┘
                       ▼                         │ OpenAI 兼容 /v1
               ┌───────────────┐        ┌────────┴─────────┐
@@ -138,7 +138,7 @@ train/data_gen/
 | # | 过滤 | 判定 |
 |---|---|---|
 | F1 | 格式与参数 | `parse_trace` 成功；每个 tool_call 的 arguments 通过 `TOOL_PARAM_MODELS[name]` 校验 |
-| F2 | 序列合法 | 工具名 ∈ 6 工具；`predict_runoff` 之前出现过 `get_weather`；无重复相同调用 |
+| F2 | 序列合法 | 工具名 ∈ 已注册工具（`TOOL_PARAM_MODELS`）；无重复相同调用；`generate_plan` 必须为最后一个工具 |
 | F3 | 等级一致 | 对回放工具结果重算 `compute_warning_level`，与轨迹最终等级相同（chatty 样本豁免：要求无 tool_call 且无等级输出） |
 
 任一不过 → 丢弃并记录原因（供 FR-D6 报告过滤率）。F3 是保证"训练信号与

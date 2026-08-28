@@ -1,5 +1,4 @@
 """Hermes 轨迹序列化/解析互逆 + 非法输入拒绝。"""
-import pytest
 
 from train.data_gen.hermes_format import (
     extract_tool_calls,

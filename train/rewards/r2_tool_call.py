@@ -1,6 +1,10 @@
 """r2 工具调用正确性（0.3）：参数校验 0.15 + 顺序合法 0.15。"""
+import logging
+
 from agent.tools.schemas import TOOL_PARAM_MODELS
 from train.data_gen.hermes_format import extract_tool_calls
+
+logger = logging.getLogger(__name__)
 
 
 def r2_score(completion: str) -> float:
@@ -17,7 +21,9 @@ def r2_score(completion: str) -> float:
             break
         try:
             model(**c["arguments"])
-        except Exception:
+        except Exception as e:
+            logger.warning("[r2] 参数校验失败 tool=%s args=%s: %s",
+                           c.get("name"), c.get("arguments"), e)
             ok = False
             break
     if ok:

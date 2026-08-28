@@ -15,7 +15,6 @@ from agent.graph.synthesizer import (
     get_actions_for_level,
 )
 
-
 # ============ _extract_flow ============
 
 class TestExtractFlow:

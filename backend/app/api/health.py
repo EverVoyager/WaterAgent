@@ -8,10 +8,11 @@ import logging
 from datetime import datetime, timezone
 
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
 from app.core.config import get_settings
+from app.core.rate_limit import limiter
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,8 @@ class ReadinessResponse(BaseModel):
 
 
 @router.get("/health", response_model=HealthResponse)
-def health_check() -> HealthResponse:
+@limiter.limit("120/minute")
+def health_check(request: Request) -> HealthResponse:
     """liveness：进程存活即可，不检查依赖。"""
     settings = get_settings()
     return HealthResponse(
@@ -57,7 +59,8 @@ def health_check() -> HealthResponse:
 
 
 @router.get("/health/ready", response_model=ReadinessResponse)
-def readiness_check() -> ReadinessResponse:
+@limiter.limit("60/minute")
+def readiness_check(request: Request) -> ReadinessResponse:
     """M11：readiness 检查依赖服务是否就绪。
 
     轻量探测（短超时 + 只检查连通性），失败不阻塞服务启动。

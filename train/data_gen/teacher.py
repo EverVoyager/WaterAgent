@@ -10,7 +10,8 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Optional
+
+from openai import OpenAI
 
 from agent.tools import mock_executor
 from agent.tools.schemas import build_openai_tools
@@ -37,7 +38,7 @@ def _replay_tool(scn: Scenario, name: str, arguments: dict) -> dict:
     return mock_executor.execute_tool(name, arguments, overrides=overrides, seed=seed)
 
 
-def synthesize_one(client, model: str, scn: Scenario, max_rounds: int = 8) -> Optional[list]:
+def synthesize_one(client: OpenAI, model: str, scn: Scenario, max_rounds: int = 8) -> list | None:
     """单场景多轮合成。达到轮次上限或教师输出非法 → None。
 
     返回 Hermes 文本格式轨迹（落盘用），不含 API 原生 tool_calls 结构。
@@ -97,7 +98,7 @@ def load_done_ids(path: Path) -> set:
     return done
 
 
-def synthesize_dataset(client, model: str, scenarios: list, out_path: Path, rpm: int = 30) -> int:
+def synthesize_dataset(client: OpenAI, model: str, scenarios: list, out_path: Path, rpm: int = 30) -> int:
     """批量合成 + 追加写盘 + 断点续传。返回本次新写入条数。"""
     from tqdm import tqdm
 

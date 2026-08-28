@@ -6,7 +6,6 @@
 """
 import json
 import re
-from typing import Any, Optional
 
 _TOOL_CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
 # 等级归一化：先匹配长词（Ⅳ>Ⅲ>Ⅱ>Ⅰ），避免子串误配
@@ -44,7 +43,7 @@ def extract_tool_calls(assistant_content: str) -> list[dict]:
     return calls
 
 
-def parse_trace(messages: list[dict]) -> Optional[dict]:
+def parse_trace(messages: list[dict]) -> dict | None:
     """解析完整轨迹。返回 {"tool_calls": [...], "tool_results": [...], "final": str}；
     任一结构非法（坏 JSON、tool 消息无前置调用）返回 None。"""
     tool_calls: list[dict] = []
@@ -76,7 +75,7 @@ def parse_trace(messages: list[dict]) -> Optional[dict]:
     return {"tool_calls": tool_calls, "tool_results": tool_results, "final": final}
 
 
-def parse_final_answer(messages: list[dict]) -> Optional[str]:
+def parse_final_answer(messages: list[dict]) -> str | None:
     """从轨迹最后一个 assistant 段提取归一化等级（I/II/III/IV），无则 None。"""
     final = next((m["content"] for m in reversed(messages) if m.get("role") == "assistant"), "")
     for pattern, level in _LEVEL_MAP:

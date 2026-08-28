@@ -1,6 +1,6 @@
 """知识问答种子和合成器测试。"""
-from train.data_gen.seed_queries import SeedQuery, get_seeds, get_knowledge_seeds
-from train.data_gen.knowledge_synthesizer import synthesize_knowledge_one, _KNOWLEDGE_SYSTEM_PROMPT
+from train.data_gen.knowledge_synthesizer import _KNOWLEDGE_SYSTEM_PROMPT, synthesize_knowledge_one
+from train.data_gen.seed_queries import SeedQuery, get_knowledge_seeds, get_seeds
 
 
 def test_get_seeds_excludes_knowledge():

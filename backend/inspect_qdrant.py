@@ -8,8 +8,8 @@
     python inspect_qdrant.py --count            # 只看总数
 """
 import argparse
-import sys
 import json
+import sys
 from pathlib import Path
 
 BACKEND_DIR = Path(__file__).resolve().parent
@@ -47,7 +47,7 @@ def show_overview():
     print(f"  向量维度: {info.config.params.vectors.size}")
     print(f"  距离度量: {info.config.params.vectors.distance}")
     print(f"  索引状态: {info.status}")
-    print(f"  payload 索引:")
+    print("  payload 索引:")
     for field, schema in (info.payload_schema or {}).items():
         print(f"    - {field}: {schema.data_type}")
 

@@ -20,7 +20,23 @@
     <div class="answer">
       <span v-if="!msg.content && msg.thinking" class="typing"><i /><i /><i /></span>
       <template v-else>
-        <span class="answer-text">{{ msg.content }}</span>
+        <span class="answer-text">
+          <template v-for="(part, i) in parsedContent" :key="i">
+            <span v-if="part.type === 'text'">{{ part.value }}</span>
+            <sup
+              v-else
+              class="cite-ref"
+              :class="{ active: hasCitation(part.refId) }"
+              @click="onCiteClick(part.refId)"
+            >[{{ part.refId }}]</sup>
+          </template>
+        </span>
+        <CitationCard
+          v-if="citations.length && !msg.thinking"
+          ref="citationCardRef"
+          :citations="citations"
+          class="cite-inline"
+        />
         <span v-if="msg.thinking" class="cursor">▏</span>
       </template>
     </div>
@@ -29,10 +45,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import ReasoningBlock from '@/components/ReasoningBlock.vue'
 import ToolChainBlock from '@/components/ToolChainBlock.vue'
 import WarningCard from '@/components/WarningCard.vue'
+import CitationCard from '@/components/CitationCard.vue'
 import type { Message } from '@/composables/useChatSessions'
 
 const props = defineProps<{ msg: Message }>()
@@ -40,6 +57,41 @@ const props = defineProps<{ msg: Message }>()
 const showWarning = computed(
   () => props.msg.response?.intent === 'agent_task' && !!props.msg.response?.warning_level,
 )
+
+const citations = computed(() => props.msg.response?.citations || [])
+
+const citationCardRef = ref<InstanceType<typeof CitationCard> | null>(null)
+
+/** 解析 answer 中的 [编号] 标记，拆分为文本片段与引用标记 */
+const parsedContent = computed(() => {
+  const text = props.msg.content || ''
+  if (!citations.value.length) return [{ type: 'text' as const, value: text }]
+  const parts: Array<{ type: 'text'; value: string } | { type: 'cite'; refId: number }> = []
+  const regex = /\[(\d+)\]/g
+  let lastIndex = 0
+  let match: RegExpExecArray | null
+  while ((match = regex.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push({ type: 'text', value: text.slice(lastIndex, match.index) })
+    }
+    parts.push({ type: 'cite', refId: parseInt(match[1], 10) })
+    lastIndex = regex.lastIndex
+  }
+  if (lastIndex < text.length) {
+    parts.push({ type: 'text', value: text.slice(lastIndex) })
+  }
+  return parts
+})
+
+function hasCitation(refId: number): boolean {
+  return citations.value.some((c) => c.ref_id === refId)
+}
+
+function onCiteClick(refId: number) {
+  if (hasCitation(refId) && citationCardRef.value) {
+    citationCardRef.value.highlight(refId)
+  }
+}
 </script>
 
 <style scoped>
@@ -80,6 +132,32 @@ const showWarning = computed(
 .answer-text {
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.cite-inline {
+  display: inline-flex;
+  vertical-align: middle;
+  margin-left: 6px;
+}
+
+.cite-ref {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  cursor: default;
+  vertical-align: super;
+  line-height: 0;
+  padding: 0 1px;
+}
+
+.cite-ref.active {
+  color: var(--accent);
+  cursor: pointer;
+  transition: color 0.15s;
+}
+
+.cite-ref.active:hover {
+  color: var(--accent-hover);
 }
 
 .typing {

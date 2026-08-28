@@ -12,7 +12,9 @@ import json
 import logging
 from dataclasses import dataclass
 
-from train.data_gen.hermes_format import parse_trace
+from openai import OpenAI
+
+from train.data_gen.scenario import Scenario
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +137,7 @@ def _parse_judge_response(content: str) -> JudgeResult | None:
     )
 
 
-def judge_trace(client, model: str, messages: list, scenario,
+def judge_trace(client: OpenAI, model: str, messages: list, scenario: Scenario,
                 max_retries: int = 3) -> JudgeResult | None:
     """对单条轨迹做 LLM-as-Judge 评判。
 

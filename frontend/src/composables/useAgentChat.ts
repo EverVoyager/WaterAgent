@@ -1,7 +1,7 @@
 /**
  * Agent 对话状态管理 composable
  *
- * 消息数据接入 useChatSessions（localStorage 持久化），
+ * 消息数据接入 useChatSessions（后端 MySQL 持久化），
  * 本 composable 负责 SSE 流式交互与消息状态推进。
  * 模块级单例：多组件（AgentView / ChatInput / ...）共享同一状态。
  */
@@ -65,8 +65,8 @@ export function stepName(step: string): string {
 }
 
 // ====== 模块级单例状态 ======
-
-const { activeMessages, ensureActiveSession, persistActiveSession } = useChatSessions()
+const { sessions, activeSessionId, activeMessages, ensureActiveSession, persistActiveSession, persistSessionById } =
+  useChatSessions()
 const toast = useToast()
 
 const inputText = ref('')
@@ -74,11 +74,39 @@ const loading = ref(false)
 const userScrolledUp = ref(false)
 let abortController: AbortController | null = null
 
+/**
+ * 流式目标：事件应写入的会话与消息索引。
+ * 流式期间用户可能切换会话，activeMessages 会指向新会话，
+ * 因此事件写入必须以 streamTarget 定位（per-conversation 隔离），
+ * 否则会污染其它会话或丢失回答。
+ */
+let streamTarget: { sessionId: string; aiMsgIdx: number } | null = null
+
+/** 从 streamTarget 定位消息（经 reactive sessions 取 proxy，保证流式更新触发视图） */
+function findStreamMessage(target: { sessionId: string; aiMsgIdx: number } | null): Message | undefined {
+  if (!target) return undefined
+  const session = sessions.value.find((s) => s.id === target.sessionId)
+  return session?.messages[target.aiMsgIdx]
+}
+
+/** 流结束后持久化目标会话（而非当前 active 会话），并清理 streamTarget */
+function finishStream(target: { sessionId: string; aiMsgIdx: number } | null) {
+  abortController = null
+  streamTarget = null
+  const persist = target ? persistSessionById(target.sessionId) : persistActiveSession()
+  persist.catch((e) => toast.error(e?.message || '会话同步失败'))
+}
+
 async function sendQuery() {
   const q = inputText.value.trim()
   if (!q || loading.value) return
 
-  ensureActiveSession()
+  try {
+    await ensureActiveSession()
+  } catch (e: any) {
+    toast.error(e?.response?.data?.detail || e?.message || '创建会话失败')
+    return
+  }
 
   const history: ChatMessage[] = activeMessages.value.map((m) => ({
     role: m.role,
@@ -97,6 +125,8 @@ async function sendQuery() {
     response: undefined,
   })
   const aiMsgIdx = activeMessages.value.length - 1
+  // 记录流式目标：后续事件始终写入该会话的消息，与用户当前浏览的会话解耦
+  streamTarget = { sessionId: activeSessionId.value, aiMsgIdx }
   inputText.value = ''
   loading.value = true
   userScrolledUp.value = false
@@ -105,20 +135,26 @@ async function sendQuery() {
     { query: q, history },
     (event) => handleStreamEvent(event, aiMsgIdx),
     (err) => {
-      const msg = activeMessages.value[aiMsgIdx]
+      const target = streamTarget
+      const msg = findStreamMessage(target) ?? activeMessages.value[aiMsgIdx]
       if (msg) {
         msg.thinking = false
-        msg.content = `调用失败：${err.message}`
+        // 已有部分流式内容时标记中断并保留内容，否则显示调用失败
+        msg.content = msg.content
+          ? `${msg.content}\n\n（连接中断）`
+          : `调用失败：${err.message}`
       }
       loading.value = false
-      persistActiveSession()
+      finishStream(target)
       toast.error(err.message)
     },
   )
 }
 
 function handleStreamEvent(event: AgentStreamEvent, aiMsgIdx: number) {
-  const aiMsg = activeMessages.value[aiMsgIdx]
+  // 流式期间以 streamTarget 为准（会话可能已切换）；无 streamTarget 时
+  // 退回当前会话索引（兼容直接调用）
+  const aiMsg = findStreamMessage(streamTarget) ?? activeMessages.value[aiMsgIdx]
   if (!aiMsg) return
   switch (event.type) {
     case 'reasoning_step':
@@ -171,6 +207,7 @@ function handleStreamEvent(event: AgentStreamEvent, aiMsgIdx: number) {
             reasoning: meta.reasoning || '',
             actions: meta.actions || [],
             tool_calls: [],
+            citations: meta.citations || [],
             rounds: 0,
             intent: 'agent_task',
           } as AgentQueryResponse
@@ -178,6 +215,7 @@ function handleStreamEvent(event: AgentStreamEvent, aiMsgIdx: number) {
           aiMsg.response.warning_level = meta.warning_level || ''
           aiMsg.response.reasoning = meta.reasoning || ''
           aiMsg.response.actions = meta.actions || []
+          aiMsg.response.citations = meta.citations || []
         }
       }
       break
@@ -198,14 +236,14 @@ function handleStreamEvent(event: AgentStreamEvent, aiMsgIdx: number) {
       aiMsg.chainExpanded = false
       aiMsg.reasoningExpanded = false
       loading.value = false
-      persistActiveSession()
+      finishStream(streamTarget)
       break
 
     case 'error':
       aiMsg.thinking = false
       aiMsg.content = `运行失败：${event.message}`
       loading.value = false
-      persistActiveSession()
+      finishStream(streamTarget)
       toast.error(event.message || 'Agent 运行失败')
       break
   }
@@ -214,15 +252,15 @@ function handleStreamEvent(event: AgentStreamEvent, aiMsgIdx: number) {
 function stopQuery() {
   if (abortController) {
     abortController.abort()
-    abortController = null
   }
-  const last = activeMessages.value[activeMessages.value.length - 1]
+  const target = streamTarget
+  const last = findStreamMessage(target) ?? activeMessages.value[activeMessages.value.length - 1]
   if (last && last.role === 'assistant') {
     last.thinking = false
     if (!last.content) last.content = '（已中断）'
   }
   loading.value = false
-  persistActiveSession()
+  finishStream(target)
 }
 
 function useSuggestion(s: string) {
