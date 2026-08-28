@@ -1,7 +1,3 @@
-<div align="center">
-
----
-
 ## ✨ 特性亮点
 
 - 🔧 **LLM 原生 Function Calling 工具编排** —— 无关键词路由，planner 自主规划多轮工具调用（去重 / 轮次控制 / 跨工具数据流注入），并发执行 + TTL 缓存
@@ -428,4 +424,3 @@ python -m pytest backend/tests train/tests && python -m ruff check .
 
 ---
 
-<div align="center">
