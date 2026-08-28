@@ -38,10 +38,10 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     session_id VARCHAR(32) NOT NULL,
     seq INT NOT NULL DEFAULT 0 COMMENT '消息在会话中的顺序（0-based）',
     role VARCHAR(16) NOT NULL COMMENT 'user / assistant',
-    content TEXT,
-    tool_events_json TEXT COMMENT 'ToolEvent[] JSON',
-    reasoning_steps_json TEXT COMMENT 'ReasoningStepEntry[] JSON',
-    response_json TEXT COMMENT 'AgentQueryResponse JSON',
+    content MEDIUMTEXT,
+    tool_events_json MEDIUMTEXT COMMENT 'ToolEvent[] JSON',
+    reasoning_steps_json MEDIUMTEXT COMMENT 'ReasoningStepEntry[] JSON',
+    response_json MEDIUMTEXT COMMENT 'AgentQueryResponse JSON',
     thinking TINYINT(1) DEFAULT 0,
     chain_expanded TINYINT(1) DEFAULT 0,
     reasoning_expanded TINYINT(1) DEFAULT 0,
@@ -49,6 +49,25 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     FOREIGN KEY (session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE,
     INDEX idx_session_seq (session_id, seq)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='聊天消息'
+"""
+
+# 列类型迁移：多轮联网搜索的工具事件 JSON 可能超过 TEXT 的 64KB 上限
+# （线上实测 DataError 1406 "Data too long for column 'tool_events_json'"），
+# 升级为 MEDIUMTEXT（16MB）。幂等：仅在检测到旧类型时执行 ALTER。
+_MIGRATE_TEXT_TO_MEDIUMTEXT = """
+SELECT COUNT(*) FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA = DATABASE()
+  AND TABLE_NAME = 'chat_messages'
+  AND COLUMN_NAME IN ('content', 'tool_events_json', 'reasoning_steps_json', 'response_json')
+  AND DATA_TYPE = 'text'
+"""
+
+_ALTER_COLUMNS_TO_MEDIUMTEXT = """
+ALTER TABLE chat_messages
+    MODIFY COLUMN content MEDIUMTEXT,
+    MODIFY COLUMN tool_events_json MEDIUMTEXT COMMENT 'ToolEvent[] JSON',
+    MODIFY COLUMN reasoning_steps_json MEDIUMTEXT COMMENT 'ReasoningStepEntry[] JSON',
+    MODIFY COLUMN response_json MEDIUMTEXT COMMENT 'AgentQueryResponse JSON'
 """
 
 
@@ -106,6 +125,11 @@ class SessionStore:
                 with self._get_conn() as conn, conn.cursor() as cur:
                     cur.execute(_CREATE_SESSIONS_TABLE)
                     cur.execute(_CREATE_MESSAGES_TABLE)
+                    # 幂等迁移：旧表 TEXT 列升级 MEDIUMTEXT（仅检测到旧类型时 ALTER）
+                    cur.execute(_MIGRATE_TEXT_TO_MEDIUMTEXT)
+                    if cur.fetchone()["COUNT(*)"] > 0:
+                        cur.execute(_ALTER_COLUMNS_TO_MEDIUMTEXT)
+                        logger.info("[session] 已将 chat_messages 大字段升级为 MEDIUMTEXT")
                 logger.info("[session] MySQL 表已就绪（chat_sessions/chat_messages）")
                 self._initialized = True
             except Exception as e:

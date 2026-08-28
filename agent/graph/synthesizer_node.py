@@ -20,7 +20,7 @@ from openai import (
 
 from agent.graph.errors import LLMError, _classify_llm_error
 from agent.graph.state import AgentState
-from agent.graph.synthesizer import compute_warning_level
+from agent.graph.synthesizer import compute_warning_level, get_actions_for_level
 from agent.prompts import (
     CITATION_GUIDANCE as _CITATION_GUIDANCE,
 )
@@ -302,6 +302,29 @@ def _apply_rule_level_override(
     logger.warning("[synthesizer] %s", note)
 
 
+def _rule_engine_fallback_metadata(tool_results: dict[str, Any]) -> dict[str, Any]:
+    """metadata 输出异常时的规则引擎降级（永不让请求因格式问题硬失败）。
+
+    LLM 输出非法 JSON（如被 token 截断）时，用规则引擎重算等级与标准措施，
+    citations 置空，Phase 2 仍会基于此生成自然语言回答。
+    """
+    try:
+        rule_level, rule_reason = compute_warning_level(tool_results)
+    except Exception:
+        rule_level, rule_reason = "", ""
+    has_data = bool(rule_reason) and "暂无足够数据" not in rule_reason
+    level = rule_level if has_data else ""
+    return {
+        "warning_level": level,
+        "reasoning": (
+            "（综合研判结构化输出异常，已降级为规则引擎研判）"
+            + (rule_reason if has_data else "")
+        ),
+        "actions": get_actions_for_level(level) if has_data else [],
+        "citations": [],
+    }
+
+
 def _synth_via_llm(
     query: str,
     tool_results: dict[str, Any],
@@ -345,11 +368,26 @@ def _synth_via_llm(
             result = _parse_synthesizer_json(raw_content)
         if result is None:
             logger.error("[synthesizer] LLM 返回非 JSON（raw 前 300 字）: %s", raw_content[:300])
-            raise LLMError(
-                "format_error",
-                f"LLM 综合研判返回格式异常（非 JSON），原始内容前 200 字：{raw_content[:200]}",
-                status_code=502,
-            )
+            if attempt < _MAX_VERIFY_RETRIES:
+                # 带反馈重试（常见于输出被截断或字段类型错误）
+                messages.append({"role": "assistant", "content": raw_content[:2000]})
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "你上次的输出不是合法 JSON（可能被截断）。请严格输出符合 schema 的"
+                        " JSON 对象：actions 只放简短的应急措施文本（不要放链接）；"
+                        "字段值中的双引号须转义；citations 只引用上下文中带 [编号] 的来源。"
+                    ),
+                })
+                continue
+            # 重试用尽：规则引擎降级，不让请求因格式问题硬失败
+            logger.error("[synthesizer] JSON 解析重试用尽，降级为规则引擎 metadata")
+            result = _rule_engine_fallback_metadata(tool_results)
+            if not result.get("answer"):
+                result["answer"] = (
+                    (result.get("reasoning") or "")
+                    + ("\n建议措施：" + "；".join(result["actions"]) if result["actions"] else "")
+                )
 
         _normalize_level(result)
         raw_citations = result.get("citations", []) or []
@@ -456,11 +494,23 @@ def _synth_metadata_via_llm_iter(
             result = _parse_synthesizer_json(raw_content)
         if result is None:
             logger.error("[synthesizer] Phase 1 LLM 返回非 JSON（raw 前 300 字）: %s", raw_content[:300])
-            raise LLMError(
-                "format_error",
-                f"LLM 综合研判 metadata 返回格式异常（非 JSON），原始内容前 200 字：{raw_content[:200]}",
-                status_code=502,
-            )
+            if attempt < _MAX_VERIFY_RETRIES:
+                yield {"type": "reasoning_step", "step": "synthesizer", "phase": "decision",
+                       "message": "结构化输出格式异常（可能被截断），正在重新生成...",
+                       "details": {"attempt": attempt}}
+                messages.append({"role": "assistant", "content": raw_content[:2000]})
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "你上次的输出不是合法 JSON（可能被截断）。请严格输出符合 schema 的"
+                        " JSON 对象：actions 只放简短的应急措施文本（不要放链接）；"
+                        "字段值中的双引号须转义；citations 只引用上下文中带 [编号] 的来源。"
+                    ),
+                })
+                continue
+            # 重试用尽：规则引擎降级，不让请求因格式问题硬失败
+            logger.error("[synthesizer] Phase 1 JSON 解析重试用尽，降级为规则引擎 metadata")
+            result = _rule_engine_fallback_metadata(tool_results)
 
         _normalize_level(result)
         raw_citations = result.get("citations", []) or []

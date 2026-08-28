@@ -224,3 +224,40 @@ class TestPhase1ProgressEvents:
         assert any("生成研判结论" in e["message"] for e in progress)
         assert any("校验引用" in e["message"] for e in progress)
         assert all(e["step"] == "synthesizer" for e in progress)
+
+
+class TestFormatErrorResilience:
+    """metadata JSON 解析失败：重试 → 规则引擎降级，永不硬失败。"""
+
+    def test_all_attempts_bad_json_degrades_to_rule_engine(self):
+        from unittest.mock import patch
+
+        from agent.graph.synthesizer_node import _synth_metadata_via_llm
+
+        # 三次都返回非法 JSON（模拟截断）→ 不抛异常，降级为规则引擎 metadata
+        with patch("agent.graph.synthesizer_node._call_synth_with_fallback",
+                   return_value=_mock_resp("这不是JSON，被截断了 \"{")) as mock_call, \
+             patch("agent.graph.synthesizer_node.get_llm_config", return_value={"model": "t"}), \
+             patch("agent.graph.synthesizer_node.get_llm_client"):
+            meta, citations = _synth_metadata_via_llm("查询", {"get_hydrology": _hydrology()})
+            assert mock_call.call_count == 3  # 1 次初始 + 2 次重试
+            assert meta["warning_level"] == "II"  # 规则引擎按流量 3200 判 II
+            assert "降级" in meta["reasoning"]
+            assert isinstance(meta["actions"], list) and meta["actions"]
+            assert citations == []
+
+    def test_bad_then_good_json_retries_once(self):
+        import json
+        from unittest.mock import patch
+
+        from agent.graph.synthesizer_node import _synth_metadata_via_llm
+
+        good = json.dumps({"warning_level": "II", "reasoning": "r", "actions": [], "citations": []})
+        with patch("agent.graph.synthesizer_node._call_synth_with_fallback",
+                   side_effect=[_mock_resp("截断的{"), _mock_resp(good)]) as mock_call, \
+             patch("agent.graph.synthesizer_node.get_llm_config", return_value={"model": "t"}), \
+             patch("agent.graph.synthesizer_node.get_llm_client"):
+            meta, _ = _synth_metadata_via_llm("查询", {"get_hydrology": _hydrology()})
+            assert mock_call.call_count == 2
+            assert meta["warning_level"] == "II"
+            assert "降级" not in meta["reasoning"]
