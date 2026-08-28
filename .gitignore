@@ -72,3 +72,6 @@ Thumbs.db
 htmlcov/
 .coverage
 .coverage.*
+
+# 文档
+docs/
