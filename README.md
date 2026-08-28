@@ -420,7 +420,7 @@ python -m pytest backend/tests train/tests && python -m ruff check .
 
 ## 📄 许可证
 
-待添加（建议推送到 GitHub 前选定 MIT / Apache-2.0 并添加 LICENSE 文件）。
+本项目基于 [MIT License](LICENSE) 开源。
 
 ---
 
