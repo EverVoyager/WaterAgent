@@ -90,6 +90,11 @@ class Settings(BaseSettings):
     MYSQL_DATABASE: str = "water_agent"
     # 自进化开关（关闭时反思循环不运行）
     SELF_EVOLUTION_ENABLED: bool = True
+    # 长期记忆双层文件（对标 Claude Code CLAUDE.md + auto-memory）：
+    # MEMORY_FILE 用户权威手册（Agent 只读），MEMORY_DIR Agent 自动记忆目录
+    AUTO_MEMORY_ENABLED: bool = True
+    MEMORY_FILE: str = "MEMORY.md"
+    MEMORY_DIR: str = "memory"
     # Curator 后台治理（借鉴 Hermes Agent v0.12.0 Curator）：
     # 周期性剪枝僵尸记忆 / LLM 压缩合并 / 向量索引对账 / 写治理报告
     CURATOR_ENABLED: bool = True

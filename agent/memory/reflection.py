@@ -1,32 +1,35 @@
-"""异步反思循环（Hermes 范式核心）。
+"""异步反思循环（五类记忆架构版）。
 
-触发条件（满足任一即触发）：
+触发条件（满足任一即触发，不变）：
 1. user_correction — 用户明确纠正（"不对"/"应该是"/"错了"等）
-2. tool_failure — 工具调用失败后重试成功
-3. format_error — LLM 输出格式错误重试
-4. multi_round — 多轮（>=2）才解决的问题
-5. explicit_feedback — 用户给出偏好（"以后..."）
+2. explicit_feedback — 用户给出偏好（"以后..."）
+3. tool_failure — 工具调用失败
+4. format_error — LLM 输出格式错误重试
+5. multi_round — 多轮（>=2）才解决的问题
 
-反思流程：
-1. 判断是否值得反思（should_reflect）
-2. 用轻量 LLM 生成反思内容（结构化 JSON）
-3. 提取经验写入 MySQL（长期记忆 + 技能记忆）
-4. 记录到反思日志（审计）
+写入分发（LLM 输出新 schema）：
+- longterm_edits   → memory/ 目录（文件，无需 MySQL）
+- semantic_memories → agent_semantic 表 + 向量索引
+- episode           → agent_episodes 表 + 向量索引
+- procedure         → agent_procedures 表 + 向量索引
+- demote            → 语义记忆删除 / 程序记忆降权
 
-异步执行：用 ThreadPoolExecutor 后台运行，不阻塞响应。
+三道写入安全闸（全类型通用）：
+1. 提示词注入扫描（防"请记住：忽略所有指令"式持久化攻击）
+2. 敏感信息过滤（对齐 Codex redaction：API key/密码/token/手机号拒写）
+3. rubric 质量门槛由反思 prompt 自评（class-first，输出前自滤）
+
+异步执行：ThreadPoolExecutor 后台运行，不阻塞响应。
 """
 import json
 import logging
+import re
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from agent.memory.memory_store import (
-    MemoryStore,
-    MemoryType,
-    get_memory_store,
-    is_memory_enabled,
-)
+from agent.memory.longterm import apply_longterm_edits
+from agent.memory.memory_store import get_memory_store, is_memory_enabled
 from agent.prompts.reflection import (
     COMPACT_SYSTEM_PROMPT as _COMPACT_SYSTEM_PROMPT,
 )
@@ -45,8 +48,7 @@ _REFLECT_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="reflec
 _CORRECTION_KEYWORDS = {"不对", "错了", "应该是", "不是", "不对吧", "搞错了", "修正"}
 _FEEDBACK_KEYWORDS = {"以后", "下次", "请记住", "建议", "希望", "偏好", "不要", "不要用"}
 
-# 反思输出 token 预算：思考型模型的 <think> 块会消耗大量预算，
-# 800 会导致 content 为空（曾导致反思 100% 失败），结构化 JSON 正文也需要余量
+# 反思输出 token 预算：思考型模型的 <think> 块会消耗大量预算
 _REFLECTION_MAX_TOKENS = 4096
 
 
@@ -58,19 +60,7 @@ def should_reflect(
     rounds: int,
     format_retry: bool = False,
 ) -> str | None:
-    """判断是否应触发反思。返回触发原因（None 表示不反思）。
-
-    Args:
-        user_query: 用户原始查询
-        final_answer: 最终回答
-        tool_calls: 工具调用记录
-        tool_errors: 工具错误列表（非空的 error 字段）
-        rounds: 规划轮次
-        format_retry: 是否经历了格式错误重试
-
-    Returns:
-        触发原因字符串（如 "user_correction"），None 表示不反思
-    """
+    """判断是否应触发反思。返回触发原因（None 表示不反思）。"""
     # 1. 用户明确纠正
     if any(kw in user_query for kw in _CORRECTION_KEYWORDS):
         return "user_correction"
@@ -89,6 +79,17 @@ def should_reflect(
     return None
 
 
+def _reflection_available() -> bool:
+    """反思是否可运行：长期记忆（文件）或 MySQL 任一可用。"""
+    try:
+        from app.core.config import get_settings
+        if getattr(get_settings(), "AUTO_MEMORY_ENABLED", True):
+            return True
+    except Exception:
+        pass
+    return is_memory_enabled()
+
+
 def run_reflection_async(
     user_query: str,
     final_answer: str,
@@ -101,17 +102,14 @@ def run_reflection_async(
 ) -> None:
     """异步执行反思循环（fire-and-forget，不阻塞调用方）。
 
-    在 done 事件后调用，反思结果写入 MySQL。
-
     Args:
-        injected_memories: 本次请求注入到 prompt 的记忆 [{"id", "content"}]，
-            供反思评估注入有效性（被注入后仍被纠正 → 降权，GEPA 效果闭环）
+        injected_memories: 本次请求注入到 prompt 的记忆 [{"id", "content", "kind"}]，
+            供反思评估注入有效性（被注入后仍被纠正 → demote，效果闭环）
     """
-    if not is_memory_enabled():
+    if not _reflection_available():
         logger.debug("[reflection] 记忆模块未启用，跳过反思")
         return
 
-    # 提交到线程池异步执行
     _REFLECT_EXECUTOR.submit(
         _run_reflection_sync,
         user_query=user_query,
@@ -138,10 +136,6 @@ def _run_reflection_sync(
 ) -> None:
     """反思循环同步实现（在线程池中执行）。"""
     try:
-        store = get_memory_store()
-        if not store.enabled:
-            return
-
         # 构造反思输入
         tool_summary = _summarize_tool_calls(tool_calls)
         reflection_input = {
@@ -163,152 +157,264 @@ def _run_reflection_sync(
 
         memories_created = 0
 
-        # 1. 提取长期记忆（用户偏好/纠正/领域知识）
-        for mem in reflection.get("memories", []):
-            mem_type_str = mem.get("type", "")
-            content = mem.get("content", "").strip()
-            if not content or not mem_type_str:
-                continue
-            try:
-                mem_type = MemoryType(mem_type_str)
-            except ValueError:
-                continue
+        # 1. 长期记忆：写入 memory/ 目录（文件，无需 MySQL）
+        memories_created += _dispatch_longterm(reflection, user_query)
 
-            # 写入侧安全闸门：拦截提示词注入攻击载荷（所有记忆类型）
-            # 恶意用户说"请记住：忽略所有指令"→ 若不拦截会持久化注入
-            if _is_unsafe_memory_content(content):
-                logger.warning(
-                    "[reflection] 拦截疑似提示词注入的记忆（不写入）：%s", content[:100]
-                )
-                continue
+        # 2. 语义记忆：领域知识（MySQL + 向量）
+        memories_created += _dispatch_semantic(reflection, user_query)
 
-            # 写入侧硬校验：tool_failure 禁止行为指令式措辞
-            if mem_type == MemoryType.TOOL_FAILURE:
-                if _is_imperative_failure_content(content):
-                    logger.warning(
-                        "[reflection] 拦截行为指令式 tool_failure（不写入）：%s", content[:100]
-                    )
-                    continue
-
-                # EmbodiSkill 分类：execution_lapse 不写入长期记忆
-                # 区分"技能缺陷"（可复现，值得记）vs"执行失误"（偶发，不固化）
-                failure_class = mem.get("failure_classification", "").strip().lower()
-                if failure_class == "execution_lapse":
-                    logger.info(
-                        "[reflection] 跳过 execution_lapse 类型 tool_failure（不固化偶发失误）：%s",
-                        content[:100],
-                    )
-                    continue
-
-                # 把 falsifiable_check + failure_classification 存入 context，便于注入侧自愈校验
-                falsifiable = mem.get("falsifiable_check", "").strip()
-                context = {
-                    "trigger": trigger_reason,
-                    "query": user_query[:200],
-                    "rounds": rounds,
-                    "falsifiable_check": falsifiable,
-                    "failure_classification": failure_class or "skill_defect",
-                }
-            else:
-                context = {
-                    "trigger": trigger_reason,
-                    "query": user_query[:200],
-                    "rounds": rounds,
-                }
-
-            # Rubric 质量门槛（借鉴 Hermes v0.12.0 rubric-based 反思决策）：
-            # 低质量记忆不写入，宁缺毋滥
-            if not _passes_rubric(mem):
-                logger.info(
-                    "[reflection] 跳过低质量记忆（rubric 未达标）：%s", content[:100]
-                )
-                continue
-
-            tags = mem.get("tags", [])
-            mem_id = store.add_memory(mem_type, content, context=context, tags=tags)
-            memories_created += 1
-            # 写入向量索引（语义检索用；失败不影响 MySQL 主流程）
-            _safe_index_memory(mem_id, mem_type.value, content, tags)
-
-        # 2. 提取技能记忆（成功的工具调用模式）
-        if reflection.get("skill_worthy") and tool_calls:
-            query_pattern = reflection.get("query_pattern", user_query[:100])
-            skill_id = store.add_skill(
-                query_pattern=query_pattern,
-                tool_calls=[
-                    {"name": tc.get("tool_name", ""), "arguments": tc.get("arguments", {})}
-                    for tc in tool_calls
-                ],
-                success=not tool_errors,
-                rounds_used=rounds,
-            )
-            if isinstance(skill_id, int):
-                _safe_index_skill(skill_id, query_pattern)
-
-        # 3. 效果闭环（GEPA）：注入后仍无效的记忆降权（hit_count 清零，
-        #    重新进入衰减-剪枝通道，不再反复注入错误记忆）
-        demoted = _demote_ineffective_memories(store, reflection.get("demote_ids", []))
-
-        # 4. 记录反思日志（审计）
-        reflection_text = reflection.get("reflection", "")
-        store.add_reflection(
-            user_query=user_query,
-            trigger_reason=trigger_reason,
-            tool_calls_summary=tool_summary,
-            final_answer=final_answer,
-            reflection_text=reflection_text,
-            memories_created=memories_created,
+        # 3. 情景记忆：本次事件与解法（MySQL + 向量）
+        memories_created += _dispatch_episode(
+            reflection, user_query, tool_calls, tool_errors, rounds, trigger_reason,
         )
 
-        # 5. 触发记忆压缩：对本次新增记忆的类型做 LLM 语义合并
-        #    避免"新记忆直接覆盖旧记忆"，改为 LLM 判断一致/冲突/可整合
-        if memories_created > 0:
-            _trigger_compact_for_types(store, reflection.get("memories", []))
+        # 4. 程序记忆：可复用解决方法（MySQL + 向量）
+        memories_created += _dispatch_procedure(reflection, tool_calls, tool_errors, rounds)
+
+        # 5. 效果闭环：注入后仍无效的记忆 demote
+        demoted = _demote_ineffective(reflection.get("demote") or {})
+
+        # 6. 审计日志（agent_reflections，MySQL 可用时）
+        _write_audit(
+            user_query, trigger_reason, tool_summary, final_answer,
+            reflection.get("reflection", ""), memories_created,
+        )
 
         logger.info(
-            "[reflection] 反思完成 reason=%s memories=%d skill=%s demoted=%d",
-            trigger_reason, memories_created, reflection.get("skill_worthy", False), demoted,
+            "[reflection] 反思完成 reason=%s created=%d demoted=%d",
+            trigger_reason, memories_created, demoted,
         )
     except Exception as e:
         logger.warning("[reflection] 反思失败：%s\n%s", e, traceback.format_exc())
 
 
-def _demote_ineffective_memories(store: MemoryStore, demote_ids: list[Any]) -> int:
-    """对反思判定无效的注入记忆降权。返回成功降权数。"""
-    if not demote_ids:
-        return 0
-    demoted = 0
-    for mid in demote_ids:
-        try:
-            if isinstance(mid, int | str) and store.demote_memory(int(mid)):
-                demoted += 1
-        except (TypeError, ValueError):
+# ====== 写入分发 ======
+
+def _dispatch_longterm(reflection: dict[str, Any], user_query: str) -> int:
+    """长期记忆编辑 → memory/ 目录（只经安全闸，无 MySQL 依赖）。"""
+    edits = reflection.get("longterm_edits") or []
+    safe_edits = []
+    for edit in edits:
+        if not isinstance(edit, dict):
             continue
+        content = str(edit.get("content", "")).strip()
+        if not content:
+            continue
+        if _is_unsafe_memory_content(content) or _is_sensitive_content(content):
+            logger.warning("[reflection] 拦截不安全长期记忆编辑：%s", content[:80])
+            continue
+        safe_edits.append(edit)
+    if not safe_edits:
+        return 0
+    applied = apply_longterm_edits(safe_edits)
+    return len(applied)
+
+
+def _dispatch_semantic(reflection: dict[str, Any], user_query: str) -> int:
+    """语义记忆（领域知识）→ agent_semantic + 向量索引。"""
+    try:
+        from agent.memory.semantic_store import get_semantic_store
+        store = get_semantic_store()
+        if not store.enabled:
+            return 0
+    except Exception:
+        return 0
+
+    created = 0
+    for mem in reflection.get("semantic_memories") or []:
+        if not isinstance(mem, dict):
+            continue
+        title = str(mem.get("title", "")).strip()
+        content = str(mem.get("content", "")).strip()
+        if not title or not content:
+            continue
+        if _is_unsafe_memory_content(content) or _is_sensitive_content(content):
+            logger.warning("[reflection] 拦截不安全语义记忆：%s", content[:80])
+            continue
+        tags = mem.get("tags") or []
+        mem_id = store.add_semantic(
+            title=title, content=content, source="reflection",
+            tags=",".join(str(t) for t in tags),
+        )
+        if isinstance(mem_id, int):
+            created += 1
+            _safe_call(_index_semantic, mem_id, title, content)
+    return created
+
+
+def _dispatch_episode(
+    reflection: dict[str, Any],
+    user_query: str,
+    tool_calls: list[dict[str, Any]],
+    tool_errors: list[str],
+    rounds: int,
+    trigger_reason: str,
+) -> int:
+    """情景记忆（本次事件与解法）→ agent_episodes + 向量索引。
+
+    无 episode 输出时按触发原因兜底一条最小记录（保证重大事件不漏记）。
+    """
+    try:
+        from agent.memory.episode_store import get_episode_store
+        store = get_episode_store()
+        if not store.enabled:
+            return 0
+    except Exception:
+        return 0
+
+    ep = reflection.get("episode") or {}
+    event_summary = str(ep.get("event_summary", "")).strip()
+    if not event_summary:
+        return 0
+    if _is_unsafe_memory_content(event_summary):
+        logger.warning("[reflection] 拦截不安全情景记忆：%s", event_summary[:80])
+        return 0
+    resolution = str(ep.get("resolution", "")).strip()
+    if _is_sensitive_content(event_summary) or _is_sensitive_content(resolution):
+        logger.warning("[reflection] 拦截含敏感信息的情景记忆")
+        return 0
+    outcome = ep.get("outcome", "success")
+    if outcome not in ("success", "failure", "partial"):
+        outcome = "partial"
+
+    ep_id = store.add_episode(
+        event_summary=event_summary,
+        resolution=resolution,
+        outcome=outcome,
+        query_summary=user_query[:512],
+        tool_calls=[
+            {"name": tc.get("tool_name", ""), "arguments": tc.get("arguments", {})}
+            for tc in (tool_calls or [])
+        ],
+        tags=trigger_reason,
+    )
+    if isinstance(ep_id, int):
+        _safe_call(_index_episode, ep_id, event_summary, resolution)
+        return 1
+    return 0
+
+
+def _dispatch_procedure(
+    reflection: dict[str, Any],
+    tool_calls: list[dict[str, Any]],
+    tool_errors: list[str],
+    rounds: int,
+) -> int:
+    """程序记忆（可复用解决方法）→ agent_procedures + 向量索引。"""
+    proc = reflection.get("procedure") or {}
+    if not isinstance(proc, dict) or not proc.get("worthy") or not tool_calls:
+        return 0
+    try:
+        from agent.memory.procedure_store import get_procedure_store
+        store = get_procedure_store()
+        if not store.enabled:
+            return 0
+    except Exception:
+        return 0
+
+    name = str(proc.get("name", "")).strip()
+    applicability = str(proc.get("applicability", "")).strip()
+    steps = proc.get("steps") or []
+    if not name or not applicability or not steps:
+        return 0
+    if _is_unsafe_memory_content(applicability + name) or _is_sensitive_content(applicability):
+        logger.warning("[reflection] 拦截不安全程序记忆：%s", name[:80])
+        return 0
+    tool_sequence = proc.get("tool_sequence") or [
+        tc.get("tool_name", "") for tc in tool_calls if tc.get("tool_name")
+    ]
+
+    proc_id = store.add_procedure(
+        name=name, applicability=applicability, steps=steps,
+        tool_sequence=tool_sequence, source="reflection",
+    )
+    if isinstance(proc_id, int):
+        _safe_call(_index_procedure, proc_id, applicability)
+        return 1
+    return 0
+
+
+def _demote_ineffective(demote: dict[str, Any]) -> int:
+    """效果闭环：注入后仍无效的记忆降权/删除。返回处理数。"""
+    demoted = 0
+    semantic_ids = demote.get("semantic_ids") or []
+    if semantic_ids:
+        try:
+            from agent.memory.semantic_store import get_semantic_store
+            store = get_semantic_store()
+            for mid in semantic_ids:
+                try:
+                    if store.delete_semantic(int(mid)):
+                        _safe_call(_remove_semantic, int(mid))
+                        demoted += 1
+                except (TypeError, ValueError):
+                    continue
+        except Exception:
+            pass
+    procedure_ids = demote.get("procedure_ids") or []
+    if procedure_ids:
+        try:
+            from agent.memory.procedure_store import get_procedure_store
+            store = get_procedure_store()
+            for mid in procedure_ids:
+                try:
+                    store.demote(int(mid))
+                    demoted += 1
+                except (TypeError, ValueError):
+                    continue
+        except Exception:
+            pass
     return demoted
 
 
-def _safe_index_memory(
-    mem_id: Any, memory_type: str, content: str, tags: list[str] | None = None
+def _write_audit(
+    user_query: str, trigger_reason: str, tool_summary: str,
+    final_answer: str, reflection_text: str, memories_created: int,
 ) -> None:
-    """把新记忆写入向量索引（尽力而为，失败只记日志）。"""
+    """审计日志写 agent_reflections（MySQL 可用时）。"""
     try:
-        if not isinstance(mem_id, int):
-            return  # add_memory 失败（或测试 mock）时跳过
-        from agent.memory import vector_index
-        vector_index.index_memory(mem_id, memory_type, content, tags)
-    except Exception as e:
-        logger.debug("[reflection] 写入记忆向量索引失败：%s", e)
-
-
-def _safe_index_skill(skill_id: Any, query_pattern: str) -> None:
-    """把新技能写入向量索引（尽力而为，失败只记日志）。"""
-    try:
-        if not isinstance(skill_id, int):
+        if not is_memory_enabled():
             return
-        from agent.memory import vector_index
-        vector_index.index_skill(skill_id, query_pattern)
+        store = get_memory_store()
+        store.add_reflection(
+            user_query=user_query,
+            trigger_reason=trigger_reason,
+            tool_calls_summary=tool_summary,
+            final_answer=final_answer,
+            reflection_text=reflection_text or "(无)",
+            memories_created=memories_created,
+        )
     except Exception as e:
-        logger.debug("[reflection] 写入技能向量索引失败：%s", e)
+        logger.debug("[reflection] 审计写入失败：%s", e)
+
+
+# ====== 向量索引（尽力而为） ======
+
+def _safe_call(fn, *args) -> None:
+    try:
+        fn(*args)
+    except Exception as e:
+        logger.debug("[reflection] 向量索引操作失败：%s", e)
+
+
+def _index_semantic(mem_id: int, title: str, content: str) -> None:
+    from agent.memory import vector_index
+    vector_index.index_semantic(mem_id, title, content)
+
+
+def _index_episode(ep_id: int, event_summary: str, resolution: str) -> None:
+    from agent.memory import vector_index
+    vector_index.index_episode(ep_id, event_summary, resolution)
+
+
+def _index_procedure(proc_id: int, applicability: str) -> None:
+    from agent.memory import vector_index
+    vector_index.index_procedure(proc_id, applicability)
+
+
+def _remove_semantic(mem_id: int) -> None:
+    from agent.memory import vector_index
+    vector_index.remove_semantic(mem_id)
 
 
 def _summarize_tool_calls(tool_calls: list[dict[str, Any]]) -> str:
@@ -328,33 +434,10 @@ def _summarize_tool_calls(tool_calls: list[dict[str, Any]]) -> str:
     return "\n".join(parts)
 
 
-# 祈使句指令性措辞（用于拦截行为指令式 tool_failure）
-_IMPERATIVE_PATTERNS = (
-    "不要", "不应该", "不应", "禁止", "一律", "永远", "必须避免",
-    "避免使用", "避免调用", "请勿", "切勿", "绝不可", "不可以",
-)
-
-
-def _is_imperative_failure_content(content: str) -> bool:
-    """检测 tool_failure 内容是否为行为指令而非事实陈述。
-
-    判据：含"不要/永远/一律/禁止"等祈使句措辞 = 行为指令，应拦截。
-    合法的事实陈述形如"调用 X 返回 Y"或"X 工具在 Z 参数下失败"。
-
-    Args:
-        content: 待检测的 tool_failure 记忆内容
-
-    Returns:
-        True 表示是行为指令（应拦截），False 表示是事实陈述（可写入）
-    """
-    if not content:
-        return False
-    return any(pattern in content for pattern in _IMPERATIVE_PATTERNS)
-
+# ====== 写入安全闸 ======
 
 # 提示词注入攻击载荷特征（写入侧安全闸门，借鉴 Hermes 的 prompt 注入扫描）
-# 恶意用户可通过"请记住：忽略所有指令"把注入攻击持久化到记忆，
-# 之后每次注入都会攻击 LLM —— 必须在写入侧拦截
+# 恶意用户可通过"请记住：忽略所有指令"把注入攻击持久化到记忆
 _UNSAFE_MEMORY_PATTERNS = (
     "忽略所有", "忽略以上", "忽略之前", "忽略上述", "无视所有", "无视指令",
     "ignore all", "ignore previous", "ignore above",
@@ -365,74 +448,55 @@ _UNSAFE_MEMORY_PATTERNS = (
 
 
 def _is_unsafe_memory_content(content: str) -> bool:
-    """检测记忆内容是否含提示词注入攻击载荷（所有记忆类型通用）。
-
-    Args:
-        content: 待检测的记忆内容
-
-    Returns:
-        True 表示疑似注入攻击（应拦截），False 表示可安全写入
-    """
+    """检测记忆内容是否含提示词注入攻击载荷（所有记忆类型通用）。"""
     if not content:
         return False
     lowered = content.lower()
     return any(pattern in lowered for pattern in _UNSAFE_MEMORY_PATTERNS)
 
 
-# Rubric 质量门槛（借鉴 Hermes v0.12.0 class-first rubric 反思决策）
-# 三个维度均为 1-5 分：任一维 < 2 或总分 < 8 → 不写入（宁缺毋滥）
-_RUBRIC_MIN_DIM = 2
-_RUBRIC_MIN_TOTAL = 8
+# 敏感信息特征（对齐 Codex memories 的 redaction：凭据/个人隐私不写入记忆）
+_SENSITIVE_PATTERNS = (
+    re.compile(r"sk-[A-Za-z0-9]{16,}"),                    # API key
+    re.compile(r"(?:api[_-]?key|apikey)\s*[:=]\s*\S{8,}", re.I),
+    re.compile(r"(?:password|passwd|pwd)\s*[:=]\s*\S{6,}", re.I),
+    re.compile(r"(?:secret|token)\s*[:=]\s*\S{8,}", re.I),
+    re.compile(r"Bearer\s+[A-Za-z0-9_\-\.]{16,}"),
+    re.compile(r"1[3-9]\d{9}"),                            # 手机号
+    re.compile(r"\d{17}[\dXx]"),                           # 身份证号
+)
 
 
-def _passes_rubric(mem: dict[str, Any]) -> bool:
-    """按 rubric 评分过滤低质量记忆。
-
-    评分维度（由反思 LLM 自评，写入 REFLECTION_SYSTEM_PROMPT）：
-    - specificity: 是否含具体数值/工具名/站名（具体才可执行）
-    - durability: 是否跨会话长期有效（只在本对话有效的低分）
-    - actionability: 能否指导未来行为（纯背景信息低分）
-
-    LLM 未返回 scores 字段时宽容放行（向后兼容）。
-    """
-    scores = mem.get("scores")
-    if not isinstance(scores, dict) or not scores:
-        return True
-    try:
-        vals = [int(scores.get(k, 3)) for k in ("specificity", "durability", "actionability")]
-    except (TypeError, ValueError):
-        return True
-    if any(v < _RUBRIC_MIN_DIM for v in vals):
+def _is_sensitive_content(content: str) -> bool:
+    """检测记忆内容是否含敏感信息（API key/密码/token/手机号/身份证）。"""
+    if not content:
         return False
-    return sum(vals) >= _RUBRIC_MIN_TOTAL
+    return any(p.search(content) for p in _SENSITIVE_PATTERNS)
 
 
-# ============ 记忆压缩（LLM 驱动的语义合并）============
+# ============ 记忆压缩（语义记忆 LLM 合并，Curator 复用）===========
 
 
-def _llm_compact_memories(
-    memory_type: str,
+def _llm_compact_semantic(
     memories: list[dict[str, Any]],
 ) -> list[dict[str, Any]] | None:
-    """调用 LLM 生成记忆合并方案。失败返回 None。"""
+    """调用 LLM 生成语义记忆合并方案。失败返回 None。"""
     if len(memories) < 2:
         return None
 
     settings = get_llm_config()
-    # reflector 专属超时（90s）：既给思考型模型留足时间，又防线程池挂死
     client = get_llm_client().with_options(timeout=LLM_TIMEOUTS["reflector"])
 
-    # 构造输入（精简字段避免上下文溢出）
     input_memories = [
         {
             "id": m["id"],
-            "content": m.get("content", "")[:200],
+            "content": (m.get("title", "") + "：" + m.get("content", ""))[:200],
             "updated_at": str(m.get("updated_at", "")),
         }
         for m in memories
     ]
     user_prompt = (
-        f"记忆类型：{memory_type}\n"
+        f"记忆类型：semantic\n"
         f"记忆列表（共 {len(memories)} 条，按时间正序）：\n"
         f"{json.dumps(input_memories, ensure_ascii=False, indent=2)}\n\n"
         f"请给出合并方案。"
@@ -460,42 +524,6 @@ def _llm_compact_memories(
     return plan
 
 
-def _trigger_compact_for_types(
-    store: MemoryStore,
-    memories_from_reflection: list[dict[str, Any]],
-) -> None:
-    """对本次反思涉及的记忆类型触发压缩。"""
-    # 收集本次新增的记忆类型
-    types_to_compact = set()
-    for mem in memories_from_reflection:
-        mem_type_str = mem.get("type", "")
-        if mem_type_str:
-            try:
-                types_to_compact.add(MemoryType(mem_type_str))
-            except ValueError:
-                continue
-
-    for mem_type in types_to_compact:
-        try:
-            deleted = store.compact_memories(mem_type, _llm_compact_memories)
-            if deleted > 0:
-                logger.info("[compact] type=%s 压缩删除 %d 条旧记忆", mem_type.value, deleted)
-                # 压缩改变了行集合（删旧+插新），同步向量索引保持两侧一致
-                _sync_type_index(store, mem_type)
-        except Exception as e:
-            logger.debug("[compact] type=%s 压缩失败（不影响主流程）：%s", mem_type.value, e)
-
-
-def _sync_type_index(store: MemoryStore, mem_type: MemoryType) -> None:
-    """压缩后同步该类型记忆的向量索引（MySQL 为 source of truth）。"""
-    try:
-        from agent.memory import vector_index
-        rows = store.get_memories(memory_type=mem_type, limit=1000)
-        vector_index.sync_memory_type(mem_type.value, rows)
-    except Exception as e:
-        logger.debug("[compact] 同步向量索引失败 type=%s：%s", mem_type.value, e)
-
-
 def _generate_reflection(reflection_input: dict[str, Any]) -> dict[str, Any] | None:
     """调用 LLM 生成反思。失败时返回 None（不抛错，反思失败不影响主流程）。"""
     settings = get_llm_config()
@@ -511,7 +539,7 @@ def _generate_reflection(reflection_input: dict[str, Any]) -> dict[str, Any] | N
         "rounds": reflection_input["rounds"],
         "trigger_reason": reflection_input["trigger_reason"],
         "format_retry": reflection_input["format_retry"],
-        # 本次注入的记忆（效果闭环：被注入后仍被纠正 → demote_ids 降权）
+        # 本次注入的记忆（效果闭环：被注入后仍被纠正 → demote 降权）
         "injected_memories": (reflection_input.get("injected_memories") or [])[:10],
     }
 

@@ -51,6 +51,12 @@ def direct_chat_node(state: AgentState) -> dict[str, Any]:
     # 借鉴 Claude 原生 Skills：元数据始终可见，LLM 自然能回答"你有哪些技能"
     # 不使用"当用户询问X时..."硬编码规则（已废弃，改用 list_skills 工具 + 元信息上下文）
     system_content = DIRECT_CHAT_PROMPT
+    # 长期记忆常驻注入（用户手册 + Agent 自动积累，双层文件）
+    try:
+        from agent.memory import build_longterm_section
+        system_content += build_longterm_section()
+    except Exception as e:
+        logger.debug("[direct_chat] 注入长期记忆失败（不影响主流程）：%s", e)
     try:
         from agent.skills import get_enabled_skills_brief
         skills_brief = get_enabled_skills_brief()
@@ -305,6 +311,12 @@ def _plan_via_function_calling(
         "5. 避免重复调用已调用过的工具（除非参数明显不同需要重新查询）。\n"
         "6. 第 1 轮若需要工具，优先调用最关键的 1-3 个。\n"
     )
+    # 长期记忆常驻注入（用户手册 + Agent 自动积累，双层文件）
+    try:
+        from agent.memory import build_longterm_section
+        system_prompt += build_longterm_section()
+    except Exception as e:
+        logger.debug("[planner] 注入长期记忆失败（不影响主流程）：%s", e)
     # 注入已启用 Skill 元信息（name + description）作为上下文
     # 借鉴 Claude 原生 Skills：元数据始终可见，LLM 可自主调用 list_skills 工具获取详细信息
     try:

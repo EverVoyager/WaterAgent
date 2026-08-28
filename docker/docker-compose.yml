@@ -76,6 +76,10 @@ services:
         condition: service_healthy
       mysql:
         condition: service_healthy
+    volumes:
+      # 长期记忆双层文件（Agent 反思写入需持久化到宿主机）
+      - ../MEMORY.md:/app/MEMORY.md
+      - ../memory:/app/memory
     ports:
       - "8000:8000"
 

@@ -1,28 +1,30 @@
-"""Hermes 范式自进化记忆模块。
+"""五类记忆架构（对齐认知科学分类 + Claude Code / Codex 双层记忆模式）。
 
-三层记忆体系：
-- 短期记忆：本次对话历史 + 工具调用轨迹（内存中，会话结束清除）
-- 长期记忆：跨会话的用户偏好、纠正、领域知识（MySQL 持久化）
-- 技能记忆：成功的工具调用模式（query 模式 → 工具组合）（MySQL 持久化）
+- 会话记忆：chat_sessions/chat_messages + context_compact（当前会话上下文）
+- 长期记忆：MEMORY.md（用户权威手册）+ memory/ 目录（Agent 自动记忆）——longterm.py
+- 语义记忆：agent_semantic 表 + 向量索引（领域知识/文档）——semantic_store.py
+- 情景记忆：agent_episodes 表 + 向量索引（事件与解决方法）——episode_store.py
+- 程序记忆：agent_procedures 表 + 向量索引（可晋升 Skill 的通用方法）——procedure_store.py
+- 反思审计：agent_reflections 表——memory_store.py
 
-反思循环（reflection.py）：
-- 触发条件：用户纠正、工具失败、格式错误、多轮解决
-- 异步执行：不阻塞响应
-- 输出：提取经验写入长期/技能记忆
-
-经验注入（experience.py）：
-- 在 planner_node 注入"过往经验"few-shot
-- 在 synthesizer_node 注入"用户偏好"
+反思循环（reflection.py）：触发条件不变，输出分发到长期/语义/情景/程序四类。
+经验注入（experience.py）：planner 注入情景+程序，synthesizer 注入语义，
+长期记忆经 longterm.build_longterm_section 常驻三处 system prompt。
 """
 from agent.memory.experience import (
     clear_injected_tracking,
+    finalize_injected_tracking,
     get_injected_memories,
     get_relevant_experiences,
-    get_user_preferences,
+    get_semantic_knowledge,
+)
+from agent.memory.longterm import (
+    apply_longterm_edits,
+    build_longterm_section,
+    load_longterm_memory,
 )
 from agent.memory.memory_store import (
     MemoryStore,
-    MemoryType,
     get_memory_store,
     is_memory_enabled,
 )
@@ -32,17 +34,21 @@ from agent.memory.reflection import (
 )
 
 __all__ = [
-    # memory_store
+    # memory_store（反思审计）
     "MemoryStore",
-    "MemoryType",
     "get_memory_store",
     "is_memory_enabled",
     # reflection
     "should_reflect",
     "run_reflection_async",
-    # experience
+    # experience（注入聚合）
     "get_relevant_experiences",
-    "get_user_preferences",
+    "get_semantic_knowledge",
     "clear_injected_tracking",
     "get_injected_memories",
+    "finalize_injected_tracking",
+    # longterm（双层文件）
+    "load_longterm_memory",
+    "build_longterm_section",
+    "apply_longterm_edits",
 ]

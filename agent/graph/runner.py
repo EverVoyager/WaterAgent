@@ -427,6 +427,13 @@ def run_graph_agent_stream_v2(
         if cancel_event is not None and cancel_event.is_set():
             return
 
+        # 效果闭环：注入记忆计数（成功路径）
+        try:
+            from agent.memory.experience import finalize_injected_tracking
+            finalize_injected_tracking(success=True)
+        except Exception:
+            pass
+
         # 自进化：异步触发反思循环（不阻塞响应发送）
         _maybe_trigger_reflection(state, user_query, final_answer)
 
@@ -444,10 +451,21 @@ def run_graph_agent_stream_v2(
             },
         }
     except LLMError as e:
+        # 效果闭环：注入记忆计数（失败路径）
+        try:
+            from agent.memory.experience import finalize_injected_tracking
+            finalize_injected_tracking(success=False)
+        except Exception:
+            pass
         # LLM 分类异常：保留 kind/status_code 传给前端（与非流式接口行为一致）
         logger.warning("[stream_v2] LLM error: %s (kind=%s)", e, e.kind)
         yield {"type": "error", "message": str(e), "kind": e.kind,
                "status_code": e.status_code}
     except Exception as e:
+        try:
+            from agent.memory.experience import finalize_injected_tracking
+            finalize_injected_tracking(success=False)
+        except Exception:
+            pass
         logger.exception("[stream_v2] Agent 流式运行失败")
         yield {"type": "error", "message": str(e)}

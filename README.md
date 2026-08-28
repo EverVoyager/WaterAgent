@@ -31,7 +31,7 @@
 - 🔧 **LLM 原生 Function Calling 工具编排** —— 无关键词路由，planner 自主规划多轮工具调用（去重 / 轮次控制 / 跨工具数据流注入），并发执行 + TTL 缓存
 - 🌊 **真实数据源接入** —— 水文爬虫（qqjjsj.com）、高德天气、Tavily 联网搜索、Qdrant 法规 RAG、SRTM DEM 地形分析、SCS-CN 降雨径流模型；生产环境真实源失败**硬失败**而非静默降级 mock
 - 📡 **两阶段真流式 SSE** —— 先推结构化预警卡（等级 / 依据 / 措施 / 引用），再逐 token 流式答案；15s 心跳保活 + 客户端断连协作式取消
-- 🧠 **自进化三层记忆** —— 长期记忆 / 技能记忆 / 反思日志 MySQL 持久化，异步反思不阻塞响应，planner / synthesizer 按需注入经验（借鉴 Hermes 范式），配套治理 API（查询 / 删除 / 压缩）
+- 🧠 **五类记忆架构**（对齐认知科学分类 + Claude Code/Codex 双层模式）—— 会话记忆（上下文压缩）、长期记忆（MEMORY.md 用户手册 Agent 只读 + memory/ 目录自动记忆）、语义记忆（领域知识向量检索）、情景记忆（事件与解法）、程序记忆（可晋升 Skill 的通用方法：经验→提炼→晋升闭环），异步反思不阻塞响应，配套治理 API
 - 🎯 **Skill 系统（兼容 Claude Skills）** —— description embedding 语义匹配按需加载指令、工具子集隔离、支持 SKILL.md / .zip 导入（含 ZIP 炸弹 / 路径穿越防护）
 - 📚 **Citation Grounding 引用溯源** —— 引用必须逐字来自来源原文，校验失败带反馈重生成，杜绝编造
 - 🛡️ **工程化兜底** —— 结构化输出三级降级 + 4 级 JSON 修复、上下文压缩（Codex compact）、`<think>` 剥离、LLM 异常分类传播前端、限流 / CORS / 配置校验
@@ -304,13 +304,22 @@ START → planner ──(第 1 轮无工具调用)──→ direct_chat → END
 规则引擎 [`agent/graph/synthesizer.py`](agent/graph/synthesizer.py) 的 `compute_warning_level`
 是全项目**单一权威来源**：线上研判、训练数据等级真值、奖励函数共用，防规则漂移。
 
-#### 自进化记忆
+#### 五类记忆架构
 
-- **触发**：用户纠正 / 工具失败 / 格式错误 / 多轮解决（异步反思，不阻塞 SSE）
-- **写入**：成功工具模式 → 技能记忆；偏好 / 纠正 / 领域知识 → 长期记忆（MySQL 三表）
-- **注入**：planner 注入「过往经验」、synthesizer 注入「用户偏好」（各上限 3 条，防 prompt 膨胀）
-- **治理**：`/api/memories` 查询 / 删除 / LLM 压缩 + 反思日志审计（借鉴 Letta，防固执记忆）；Curator 定期剪枝 / 合并对账
-- **降级**：MySQL 不可用自动回退无记忆模式
+| 记忆类型 | 承载 | 注入点 |
+|---|---|---|
+| 会话记忆 | chat_sessions/messages + 上下文压缩 | planner / synthesizer（历史摘要） |
+| 长期记忆 | `MEMORY.md`（用户手册，Agent 只读）+ `memory/` 目录（Agent 自动记忆，索引+主题文件） | 三处 system prompt 常驻 |
+| 语义记忆 | `agent_semantic` 表 + Qdrant | synthesizer「领域知识」top-3 |
+| 情景记忆 | `agent_episodes` 表 + Qdrant | planner「历史类似情形」top-2 |
+| 程序记忆 | `agent_procedures` 表 + Qdrant | planner「推荐方法」top-2 |
+
+- **反思分发**：用户纠正 / 工具失败 / 多轮解决等触发异步反思，LLM 输出分发到长期（文件）/ 语义 / 情景 / 程序四类存储；写入三道安全闸（提示词注入扫描、敏感信息过滤、rubric 质量门槛）
+- **程序记忆成长闭环**：反思写入具体模式 → Curator 周期提炼为通用步骤（LLM 泛化）→ 高复用高质量程序自动晋升候选 Skill（`enabled=false` 人工确认启用）
+- **效果闭环**：注入记忆线程级追踪，请求完成后计数（语义 hit_count / 程序 use_count+success_count），反思可 demote 无效记忆
+- **Curator 五步治理**（周期后台线程）：剪枝僵尸记忆 → 语义压缩合并 → 程序提炼 → 晋升检查 → 向量索引对账 + memory/ 目录索引修复
+- **治理 API**：`/api/memories/*` 支持手册读写、自动记忆主题编辑、语义/情景/程序查询删除、手动晋升、反思审计
+- **降级**：MySQL 未配置时长期记忆（文件）仍可用，其余类型自动禁用
 
 #### Skill 系统
 
@@ -371,13 +380,13 @@ START → planner ──(第 1 轮无工具调用)──→ direct_chat → END
 │  │  → 工具子集隔离；支持 SKILL.md / .zip 导入            │   │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │  自进化记忆（agent/memory/）— 三层记忆体系             │   │
-│  │  · 长期记忆（用户偏好/纠正/领域知识）─┐               │   │
-│  │  · 技能记忆（query→工具组合）       ├─ MySQL 持久化    │   │
-│  │  · 反思日志（审计记录）             ┘（含会话持久化）  │   │
-│  │  反思触发：用户纠正/工具失败/格式错误/多轮解决          │   │
-│  │  经验注入：planner 注入技能+教训，synth 注入偏好+知识    │   │
-│  │  治理面：/api/memories 查询/删除/压缩 + 反思日志审计   │   │
+│  │  五类记忆（agent/memory/，对齐认知科学分类）           │   │
+│  │  · 会话记忆：上下文压缩（超预算 LLM 摘要）             │   │
+│  │  · 长期记忆：MEMORY.md 手册（Agent 只读）+ memory/ 目录 │   │
+│  │  · 语义记忆（领域知识）─┐                             │   │
+│  │  · 情景记忆（事件+解法）├─ MySQL + Qdrant 向量检索     │   │
+│  │  · 程序记忆（通用方法）─┘ 可晋升 Skill（人工确认）      │   │
+│  │  Curator：剪枝→压缩→提炼→晋升→对账（周期治理）         │   │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │  上下文压缩（context_compact.py，借鉴 Codex compact）  │   │
@@ -430,7 +439,7 @@ WaterAgents/
 │   ├── hydrology/                  # SCS-CN 降雨径流模型
 │   ├── data/                       # 实时数据源（水文爬虫/高德天气/Tavily）
 │   ├── gis/                        # GIS 地形分析（SRTM DEM + rasterio）
-│   ├── memory/                     # 自进化记忆 + 会话存储 + Curator
+│   ├── memory/                     # 五类记忆（longterm/semantic/episode/procedure）+ Curator
 │   ├── prompts/                    # 系统提示词（分模块）
 │   └── tracing/                    # LangFuse 追踪
 ├── train/                          # 微调管线（data_gen/lora/grpo/rewards/eval/tests）

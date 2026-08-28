@@ -38,6 +38,12 @@ def _direct_chat_stream(
     # 借鉴 Claude 原生 Skills：元数据始终可见，LLM 自然能回答"你有哪些技能"
     # 不使用"当用户询问X时..."硬编码规则（已废弃，改用 list_skills 工具 + 元信息上下文）
     system_content = DIRECT_CHAT_PROMPT
+    # 长期记忆常驻注入（用户手册 + Agent 自动积累，双层文件）
+    try:
+        from agent.memory import build_longterm_section
+        system_content += build_longterm_section()
+    except Exception as e:
+        logger.debug("[direct_chat_stream] 注入长期记忆失败（不影响主流程）：%s", e)
     try:
         from agent.skills import get_enabled_skills_brief
         skills_brief = get_enabled_skills_brief()

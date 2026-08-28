@@ -1,16 +1,11 @@
-"""Curator：自治记忆策展（借鉴 Hermes Agent v0.12.0 Curator）。
+"""Curator：自治记忆策展（五类记忆架构版，借鉴 Hermes Agent v0.12.0 Curator）。
 
-Hermes Curator 的做法："runs as a background agent on the gateway's cron
-ticker (7-day cycle default). It grades your skill library, consolidates
-related skills, prunes dead ones, and writes per-run reports."
-
-本实现对应四个动作（周期后台线程执行，默认 7 天）：
-1. 剪枝：删除 hit_count=0 且超过 14 天未被命中的僵尸记忆
-2. 压缩：各类型记忆 LLM 语义合并（hit_count >= PROTECTED_MIN_HITS 的
-   高价值记忆受保护门控，不参与合并）
-3. 索引对账：MySQL ↔ Qdrant 向量索引全量同步（含历史数据回填，
-   修复"改造前已存在但未索引"的记忆）
-4. 报告：治理结果写入 agent_reflections（trigger_reason="curator"）
+五步治理（周期后台线程执行，默认 7 天）：
+1. 剪枝：僵尸语义记忆（零命中超期）+ 超期情景归档 + deprecated 程序清理
+2. 压缩：语义记忆 LLM 合并（高命中受保护门控不参与）
+3. 提炼：高复用程序的步骤 LLM 泛化（具体案例 → 通用步骤）
+4. 晋升：高复用高质量程序 → 自动生成候选 Skill（enabled=false 人工确认）
+5. 对账：三个向量 collection 全量同步 + memory/ 目录索引修复
 
 所有动作失败均降级为日志，不影响 Agent 主流程。
 """
@@ -19,17 +14,13 @@ import logging
 import threading
 import time
 
-from agent.memory.memory_store import (
-    MemoryType,
-    get_memory_store,
-    is_memory_enabled,
-)
+from agent.memory.memory_store import get_memory_store, is_memory_enabled
 
 logger = logging.getLogger(__name__)
 
-# 剪枝阈值：hit_count=0 且创建超过 N 天 → 僵尸记忆（Hermes: prunes dead ones）
-PRUNE_STALE_DAYS = 14
-# 单次剪枝上限（避免一次删太多，渐进治理）
+# 剪枝阈值
+PRUNE_STALE_DAYS = 14        # 语义记忆：零命中且超 N 天 → 僵尸
+EPISODE_ARCHIVE_DAYS = 90    # 情景记忆：超 N 天归档删除
 PRUNE_BATCH_LIMIT = 50
 
 # 后台线程状态（防止重复启动）
@@ -39,75 +30,221 @@ _start_lock = threading.Lock()
 
 def run_curation_once() -> dict[str, int]:
     """执行一轮完整治理。返回统计信息（也用于测试与手动触发）。"""
-    stats = {"pruned": 0, "compacted": 0, "indexed_memories": 0, "indexed_skills": 0}
+    stats = {
+        "pruned_semantic": 0, "archived_episodes": 0,
+        "compacted": 0, "refined": 0, "promoted": 0,
+        "indexed": 0, "repaired_index_lines": 0,
+    }
 
-    if not is_memory_enabled():
-        logger.debug("[curator] 记忆模块未启用，跳过治理")
-        return stats
+    # ===== 1. 剪枝 =====
+    if is_memory_enabled():
+        try:
+            from agent.memory import vector_index
+            from agent.memory.semantic_store import get_semantic_store
+            sem_store = get_semantic_store()
+            if sem_store.enabled:
+                stale_ids = sem_store.get_stale_ids(days=PRUNE_STALE_DAYS, limit=PRUNE_BATCH_LIMIT)
+                for mid in stale_ids:
+                    if sem_store.delete_semantic(mid):
+                        stats["pruned_semantic"] += 1
+                        vector_index.remove_semantic(mid)
+        except Exception as e:
+            logger.warning("[curator] 语义剪枝失败：%s", e)
 
-    store = get_memory_store()
-    if not store.enabled:
-        return stats
+        try:
+            from agent.memory.episode_store import get_episode_store
+            ep_store = get_episode_store()
+            if ep_store.enabled:
+                stats["archived_episodes"] = ep_store.delete_older_than(days=EPISODE_ARCHIVE_DAYS)
+        except Exception as e:
+            logger.warning("[curator] 情景归档失败：%s", e)
 
-    # ===== 1. 剪枝僵尸记忆 =====
+    # ===== 2. 语义记忆 LLM 压缩 =====
     try:
-        stale_ids = store.get_stale_memory_ids(days=PRUNE_STALE_DAYS, limit=PRUNE_BATCH_LIMIT)
-        for mid in stale_ids:
-            if store.delete_memory(mid):
-                stats["pruned"] += 1
-                try:
-                    from agent.memory import vector_index
-                    vector_index.remove_memory(mid)
-                except Exception as e:
-                    logger.debug("[curator] 清理向量索引失败 id=%s：%s", mid, e)
-        if stale_ids:
-            logger.info("[curator] 剪枝僵尸记忆 %d 条（hit_count=0 且超 %d 天）",
-                        stats["pruned"], PRUNE_STALE_DAYS)
+        stats["compacted"] = _compact_semantic()
     except Exception as e:
-        logger.warning("[curator] 剪枝失败：%s", e)
+        logger.warning("[curator] 压缩失败：%s", e)
 
-    # ===== 2. 各类型 LLM 压缩（高命中记忆受保护门控）=====
+    # ===== 3. 程序提炼（具体案例 → 通用步骤）=====
     try:
-        from agent.memory.reflection import _llm_compact_memories
-        for mem_type in MemoryType:
-            try:
-                deleted = store.compact_memories(mem_type, _llm_compact_memories)
-                if deleted > 0:
-                    stats["compacted"] += deleted
-                    logger.info("[curator] 压缩 type=%s 删除 %d 条", mem_type.value, deleted)
-            except Exception as e:
-                logger.debug("[curator] 压缩 type=%s 失败：%s", mem_type.value, e)
+        stats["refined"] = _refine_procedures()
     except Exception as e:
-        logger.warning("[curator] 加载压缩函数失败：%s", e)
+        logger.warning("[curator] 提炼失败：%s", e)
 
-    # ===== 3. 向量索引对账（含历史数据回填）=====
+    # ===== 4. 晋升检查（高复用程序 → 候选 Skill）=====
     try:
-        from agent.memory import vector_index
-        for mem_type in MemoryType:
-            rows = store.get_memories(memory_type=mem_type, limit=1000)
-            indexed = vector_index.sync_memory_type(mem_type.value, rows)
-            if indexed > 0:
-                stats["indexed_memories"] += indexed
-        skill_rows = store.get_all_skills_for_index(limit=500)
-        stats["indexed_skills"] = vector_index.sync_skills(skill_rows)
-        logger.info("[curator] 索引对账完成：memories=%d skills=%d",
-                    stats["indexed_memories"], stats["indexed_skills"])
+        stats["promoted"] = _promote_procedures()
+    except Exception as e:
+        logger.warning("[curator] 晋升失败：%s", e)
+
+    # ===== 5. 索引对账 + 目录治理 =====
+    try:
+        stats["indexed"] = _reconcile_indexes()
     except Exception as e:
         logger.warning("[curator] 索引对账失败：%s", e)
-
-    # ===== 4. 治理报告写入反思日志（审计）=====
     try:
-        store.add_reflection(
-            user_query="(curator) 定期记忆治理",
-            trigger_reason="curator",
-            reflection_text=json.dumps(stats, ensure_ascii=False),
-            memories_created=0,
-        )
+        from agent.memory.longterm import repair_index
+        stats["repaired_index_lines"] = repair_index()
+    except Exception as e:
+        logger.debug("[curator] 目录索引修复失败：%s", e)
+
+    # ===== 治理报告写入审计 =====
+    try:
+        if is_memory_enabled():
+            get_memory_store().add_reflection(
+                user_query="(curator) 定期记忆治理",
+                trigger_reason="curator",
+                reflection_text=json.dumps(stats, ensure_ascii=False),
+                memories_created=0,
+            )
     except Exception as e:
         logger.debug("[curator] 写治理报告失败：%s", e)
 
     logger.info("[curator] 治理完成：%s", stats)
     return stats
+
+
+def _compact_semantic() -> int:
+    """语义记忆 LLM 合并：低命中条目送压缩，高命中（>=10）受保护。"""
+    from agent.memory.reflection import _llm_compact_semantic
+    from agent.memory.semantic_store import get_semantic_store
+
+    store = get_semantic_store()
+    if not store.enabled:
+        return 0
+    memories = store.fetch_for_compact(limit=200)
+    if len(memories) < 2:
+        return 0
+    plan = _llm_compact_semantic(memories)
+    if not plan:
+        return 0
+
+    deleted_ids: list[int] = []
+    created = 0
+    for item in plan:
+        if not isinstance(item, dict):
+            continue
+        action = item.get("action")
+        source_ids = [int(i) for i in (item.get("source_ids") or [])
+                      if str(i).isdigit()]
+        content = str(item.get("content", "")).strip()
+        if action in ("merge", "replace") and content and source_ids:
+            # 整合记忆以最新源条目的 title 为题（plan 未输出 title）
+            newest_title = next(
+                (m.get("title", "") for m in memories if m["id"] == source_ids[-1]),
+                "整合知识",
+            )
+            new_id = store.add_semantic(
+                title=newest_title, content=content, source="curator",
+                tags=str(item.get("tags") or ""),
+            )
+            if isinstance(new_id, int):
+                created += 1
+                deleted_ids.extend(source_ids)
+        elif action == "keep":
+            continue
+    if deleted_ids:
+        store.delete_many(deleted_ids)
+        from agent.memory import vector_index
+        for mid in deleted_ids:
+            vector_index.remove_semantic(mid)
+    return created
+
+
+def _refine_procedures() -> int:
+    """程序提炼：use_count>=3 且 refined_count<2 的程序，LLM 把步骤泛化为通用方法。"""
+    from agent.memory.procedure_store import get_procedure_store
+    from agent.prompts.reflection import COMPACT_SYSTEM_PROMPT as _COMPACT
+    from agent.utils import parse_json_from_llm
+    from app.core.llm import LLM_TIMEOUTS, get_llm_client, get_llm_config, strip_think
+
+    store = get_procedure_store()
+    if not store.enabled:
+        return 0
+    candidates = store.get_refine_candidates()
+    if not candidates:
+        return 0
+
+    settings = get_llm_config()
+    client = get_llm_client().with_options(timeout=LLM_TIMEOUTS["reflector"])
+    refined = 0
+    for proc in candidates[:5]:  # 每轮最多提炼 5 个，控成本
+        try:
+            steps = json.loads(proc["steps_json"] or "[]")
+        except (json.JSONDecodeError, TypeError):
+            steps = []
+        user_prompt = (
+            f"以下是 Agent 解决「{proc['name']}」类问题的当前步骤记录（源自具体案例）：\n"
+            f"{json.dumps(steps, ensure_ascii=False)}\n"
+            f"适用条件：{proc['applicability']}\n\n"
+            "请把它提炼为通用的解决步骤（去掉具体案例细节，保留可复用的动作序列）。\n"
+            '输出严格 JSON：{"steps": [{"step": 1, "action": "动宾短语", "tool": "工具名或null"}], '
+            '"applicability": "泛化后的适用条件"}'
+        )
+        try:
+            resp = client.chat.completions.create(
+                model=settings["model"],
+                messages=[
+                    {"role": "system", "content": _COMPACT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.1,
+                max_tokens=2048,
+            )
+            result = parse_json_from_llm(
+                strip_think((resp.choices[0].message.content or "").strip()))
+            if isinstance(result, dict) and result.get("steps") and store.update_steps(
+                proc["id"], result["steps"],
+                applicability=str(result.get("applicability", "")) or None,
+            ):
+                refined += 1
+        except Exception as e:
+            logger.debug("[curator] 单个程序提炼失败 id=%s：%s", proc["id"], e)
+    return refined
+
+
+def _promote_procedures() -> int:
+    """晋升检查：use_count>=5 且 success_rate>=0.8 → 生成候选 Skill（enabled=false）。"""
+    from agent.memory.procedure_store import get_procedure_store
+
+    store = get_procedure_store()
+    if not store.enabled:
+        return 0
+    promoted = 0
+    for proc in store.get_promote_candidates():
+        result = store.promote_to_skill(proc["id"], auto_enable=False)
+        if result.get("ok"):
+            promoted += 1
+            logger.info("[curator] 程序晋升为候选 Skill：%s（待人工启用）",
+                        result.get("skill_name"))
+    return promoted
+
+
+def _reconcile_indexes() -> int:
+    """三个向量 collection 全量同步（MySQL 为 source of truth，含历史回填）。"""
+    from agent.memory import vector_index
+
+    total = 0
+    if is_memory_enabled():
+        try:
+            from agent.memory.semantic_store import get_semantic_store
+            rows = get_semantic_store().list_semantic(limit=1000)
+            total += vector_index.sync_semantic(rows)
+        except Exception as e:
+            logger.debug("[curator] 语义索引同步失败：%s", e)
+        try:
+            from agent.memory.episode_store import get_episode_store
+            rows = get_episode_store().list_episodes(limit=1000)
+            total += vector_index.sync_episodes(rows)
+        except Exception as e:
+            logger.debug("[curator] 情景索引同步失败：%s", e)
+        try:
+            from agent.memory.procedure_store import get_procedure_store
+            rows = get_procedure_store().list_procedures(limit=1000, status="active")
+            total += vector_index.sync_procedures(rows)
+        except Exception as e:
+            logger.debug("[curator] 程序索引同步失败：%s", e)
+    return total
 
 
 def start_curator_thread() -> None:
