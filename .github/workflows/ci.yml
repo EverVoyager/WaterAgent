@@ -80,7 +80,8 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # 测试依赖 jsdom@30 / undici@8 要求 node >=22.22，与本地开发版本（24.x）对齐
+          node-version: "24"
           cache: "npm"
           cache-dependency-path: frontend/package-lock.json
 

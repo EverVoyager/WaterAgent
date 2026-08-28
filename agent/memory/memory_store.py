@@ -15,7 +15,7 @@ import json
 import logging
 import threading
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from enum import Enum
 from functools import lru_cache
 from typing import Any
@@ -110,7 +110,7 @@ class MemoryStore:
 
     @contextmanager
     def _get_conn(self):
-        """获取 MySQL 连接（上下文管理器，自动关闭）。"""
+        """事务型连接上下文管理器：with 体成功自动 commit，异常 rollback，最后 close。"""
         if not self._enabled:
             raise RuntimeError("MemoryStore 未启用（MYSQL_PASSWORD 为空）")
         import pymysql
@@ -119,8 +119,11 @@ class MemoryStore:
         try:
             conn = pymysql.connect(**self._config)
             yield conn
-        except Exception as e:
-            logger.warning("[memory] MySQL 操作失败：%s", e)
+            conn.commit()
+        except Exception:
+            if conn:
+                with suppress(Exception):
+                    conn.rollback()
             raise
         finally:
             if conn:
@@ -142,7 +145,6 @@ class MemoryStore:
                     cur.execute(_CREATE_MEMORIES_TABLE)
                     cur.execute(_CREATE_SKILLS_TABLE)
                     cur.execute(_CREATE_REFLECTIONS_TABLE)
-                conn.commit()
                 logger.info("[memory] MySQL 表已就绪（agent_memories/agent_skills/agent_reflections）")
                 self._initialized = True
             except Exception as e:
@@ -181,7 +183,6 @@ class MemoryStore:
                     ),
                 )
                 mem_id = cur.lastrowid
-            conn.commit()
             logger.info("[memory] 添加记忆 type=%s id=%s content=%s",
                         memory_type.value, mem_id, content[:60])
             return mem_id
@@ -250,7 +251,6 @@ class MemoryStore:
                     "UPDATE agent_memories SET hit_count = hit_count + 1 WHERE id = %s",
                     (memory_id,),
                 )
-            conn.commit()
         except Exception as e:
             logger.debug("[memory] increment_hit 失败 id=%s: %s", memory_id, e)
 
@@ -276,7 +276,6 @@ class MemoryStore:
                     (memory_id,),
                 )
                 deleted = cur.rowcount
-            conn.commit()
             if deleted > 0:
                 logger.info("[memory] 删除记忆 id=%s", memory_id)
             return deleted > 0
@@ -334,7 +333,6 @@ class MemoryStore:
                         ),
                     )
                     skill_id = cur.lastrowid
-            conn.commit()
             logger.info("[memory] 记录技能 pattern=%s success=%s", query_pattern[:40], success)
             return skill_id
         except Exception as e:
@@ -431,7 +429,6 @@ class MemoryStore:
                     (memory_id,),
                 )
                 updated = cur.rowcount
-            conn.commit()
             if updated > 0:
                 logger.info("[memory] 降权记忆 id=%s（注入后仍无效）", memory_id)
             return updated > 0
@@ -489,7 +486,6 @@ class MemoryStore:
                         memories_created,
                     ),
                 )
-            conn.commit()
             logger.info("[memory] 记录反思 reason=%s memories=%d", trigger_reason, memories_created)
         except Exception as e:
             logger.warning("[memory] add_reflection 失败 reason=%s: %s", trigger_reason, e)
@@ -631,7 +627,6 @@ class MemoryStore:
                         new_mem["hit_count_sum"],
                     ),
                 )
-        conn.commit()
         return deleted_count
 
 @lru_cache(maxsize=1)

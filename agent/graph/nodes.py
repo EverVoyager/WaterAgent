@@ -21,6 +21,7 @@ from agent.graph.errors import _classify_llm_error
 from agent.graph.state import AgentState
 from agent.graph.synthesizer_node import _summarize_results
 from agent.prompts import DIRECT_CHAT_PROMPT
+from agent.utils import strip_citation_markers
 from app.core.llm import LLM_TIMEOUTS, extract_content, get_llm_client, get_llm_config
 
 logger = logging.getLogger(__name__)
@@ -102,7 +103,8 @@ def direct_chat_node(state: AgentState) -> dict[str, Any]:
         logger.exception("[direct_chat] LLM 未知异常")
         raise _classify_llm_error(e) from e
 
-    answer = extract_content(resp.choices[0].message)
+    # 闲聊路径无联网搜索，剥离模型可能编造的 [N] 引用标记
+    answer = strip_citation_markers(extract_content(resp.choices[0].message))
     logger.info("[direct_chat] answer=%s", answer[:80])
     return {
         "final_answer": answer,

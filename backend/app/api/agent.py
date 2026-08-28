@@ -50,13 +50,13 @@ class ToolCallInfo(BaseModel):
 
 
 class Citation(BaseModel):
-    """引用来源（仅联网搜索结果，已校验原文真实性）。"""
+    """引用来源（联网搜索 / 法规检索条款，均已经过原文真实性校验）。"""
 
     ref_id: int = Field(..., description="上下文编号，对应 answer 中的 [编号] 标记")
-    quote: str = Field(..., description="从搜索结果摘要中逐字摘录的片段")
-    source_type: str = Field("web_search", description="来源类型，目前固定为 web_search")
-    title: str = Field("", description="网页标题")
-    url: str = Field("", description="网页链接（可点击跳转）")
+    quote: str = Field(..., description="从来源展示文本中逐字摘录的片段")
+    source_type: str = Field("web_search", description="来源类型：web_search / regulation")
+    title: str = Field("", description="来源标题")
+    url: str = Field("", description="网页链接（法规条款无链接，为空）")
 
 
 class AgentQueryResponse(BaseModel):

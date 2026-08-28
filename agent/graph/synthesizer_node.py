@@ -20,6 +20,7 @@ from openai import (
 
 from agent.graph.errors import LLMError, _classify_llm_error
 from agent.graph.state import AgentState
+from agent.graph.synthesizer import compute_warning_level
 from agent.prompts import (
     CITATION_GUIDANCE as _CITATION_GUIDANCE,
 )
@@ -31,7 +32,12 @@ from agent.prompts import (
 )
 from agent.prompts.synthesizer import SYNTH_META_SCHEMA as _SYNTH_META_SCHEMA
 from agent.prompts.synthesizer import SYNTH_RESPONSE_SCHEMA as _SYNTH_RESPONSE_SCHEMA
-from agent.utils import WARNING_THRESHOLDS, parse_json_from_llm
+from agent.utils import (
+    WARNING_THRESHOLDS,
+    CitationMarkerFilter,
+    parse_json_from_llm,
+    strip_citation_markers,
+)
 from app.core.llm import LLM_TIMEOUTS, get_llm_client, get_llm_config, strip_think
 
 logger = logging.getLogger(__name__)
@@ -245,6 +251,57 @@ def _build_synth_messages(
     return messages, source_registry
 
 
+def _check_level_consistency(
+    result: dict[str, Any],
+    tool_results: dict[str, Any],
+) -> tuple[bool, str, str]:
+    """预警等级在线一致性门：规则引擎重算 vs LLM 输出（CoVe 式校验，零额外 LLM 成本）。
+
+    规则引擎 compute_warning_level 是全项目单一权威来源（线上研判 + 训练等级真值
+    + 奖励函数共用），LLM 等级与其不一致即视为幻觉。
+
+    Returns:
+        (是否通过, 反馈信息, 规则引擎等级)
+        工具结果中没有可判级数据（流量/降雨/水位全缺）时放行，不用默认 IV 强压 LLM。
+    """
+    try:
+        rule_level, rule_reason = compute_warning_level(tool_results)
+    except Exception as e:
+        logger.debug("[synthesizer] 规则引擎等级计算失败（跳过一致性校验）：%s", e)
+        return True, "", ""
+    if not rule_reason or "暂无足够数据" in rule_reason:
+        return True, "", rule_level
+    llm_level = result.get("warning_level", "")
+    if llm_level == rule_level:
+        return True, "", rule_level
+    return (
+        False,
+        f"预警等级与规则引擎不一致：基于工具数据的规则判定为 {rule_level} 级"
+        f"（{rule_reason}），但回答中给出 {llm_level or '(空)'} 级。"
+        f"请对照【预警等级阈值标准】和工具数据，以规则判定为准修正 warning_level。",
+        rule_level,
+    )
+
+
+def _apply_rule_level_override(
+    result: dict[str, Any],
+    rule_level: str,
+    rule_reason: str = "",
+) -> None:
+    """重试用尽仍不一致：以规则引擎等级覆盖 LLM 输出，并在 reasoning 中留痕。"""
+    if not rule_level:
+        return
+    old = result.get("warning_level", "")
+    result["warning_level"] = rule_level
+    note = (
+        f"[等级校正] LLM 原判 {old or '(空)'} 级，"
+        f"经规则引擎按工具数据校正为 {rule_level} 级"
+        + (f"（{rule_reason}）" if rule_reason else "")
+    )
+    result["reasoning"] = (note + "。" + (result.get("reasoning") or "")).lstrip("。；")
+    logger.warning("[synthesizer] %s", note)
+
+
 def _synth_via_llm(
     query: str,
     tool_results: dict[str, Any],
@@ -297,35 +354,48 @@ def _synth_via_llm(
         _normalize_level(result)
         raw_citations = result.get("citations", []) or []
 
-        # Citation Grounding 校验
-        ok, feedback = _verify_citations(raw_citations, source_registry)
-        if ok:
+        # 引用：逐条校验，无效的统一过滤（不触发重生成，避免一次坏 quote
+        # 导致 60-90s 的整轮重新调用）
+        cite_ok, cite_feedback = _verify_citations(raw_citations, source_registry)
+        if cite_ok:
             logger.info("[synthesizer] 引用校验通过（attempt=%d，%d 条引用）",
                         attempt, len(raw_citations))
+        else:
+            logger.warning("[synthesizer] 引用存在无效项，将过滤（不重生成）：%s",
+                           cite_feedback)
+
+        # 等级一致性门：不一致才触发重生成（安全攸关）
+        level_ok, level_feedback, rule_level = _check_level_consistency(result, tool_results)
+        if level_ok:
             break
 
-        logger.warning("[synthesizer] 引用校验失败（attempt=%d）：%s", attempt, feedback)
+        logger.warning("[synthesizer] 等级校验失败（attempt=%d）：%s", attempt, level_feedback)
         if attempt < _MAX_VERIFY_RETRIES:
             # 追加校验反馈，要求 LLM 修正后重生成
             messages.append({"role": "assistant", "content": content})
             messages.append({
                 "role": "user",
                 "content": (
-                    f"引用校验失败：{feedback}\n"
-                    "请重新生成，确保 citations 中的 quote 字段是从对应编号来源中"
-                    "逐字摘录的原文片段，ref_id 与上下文中的 [编号] 一致。"
-                    "若无法找到原文，请移除该引用而非编造。"
+                    f"校验失败：{level_feedback}\n"
+                    "请重新生成，warning_level 必须与基于工具数据的规则判定一致；"
+                    "citations 中的 quote 必须是对应编号来源中逐字摘录的原文片段，"
+                    "无法找到原文就移除该引用。"
                 ),
             })
         else:
-            # 重试用尽：过滤掉无法校验的引用，保留可用的
-            logger.warning("[synthesizer] 引用校验重试用尽，过滤无效引用")
+            # 重试用尽：以规则引擎等级覆盖
+            logger.warning("[synthesizer] 等级校验重试用尽，以规则引擎为准覆盖")
+            _apply_rule_level_override(result, rule_level)
 
     # 构造带元数据的引用列表
     citations = _build_citations_with_metadata(
         result.get("citations", []) or [], source_registry
     )
     _normalize_level(result)
+    # 展示层兜底：answer 只保留对应已验证引用（联网搜索）的 [N] 标记
+    valid_ids = {c["ref_id"] for c in citations}
+    if result.get("answer"):
+        result["answer"] = strip_citation_markers(result["answer"], valid_ids)
     return result, citations
 
 
@@ -335,15 +405,36 @@ def _synth_metadata_via_llm(
     history: list[dict[str, Any]] | None = None,
     skill_instructions: str = "",
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """两阶段流式 Phase 1：非流式 LLM 调用获取结构化 metadata（不含 answer）。
+    """两阶段流式 Phase 1（同步版）：非流式 LLM 调用获取结构化 metadata。
 
-    使用 _SYNTH_META_SCHEMA（无 answer 字段），answer 由 Phase 2 stream=True 生成。
-    包含 Citation Grounding 校验循环（与非流式路径一致）。
+    流式进度事件版本见 _synth_metadata_via_llm_iter（本函数是其同步包装）。
+    """
+    result, citations = None, None
+    for ev in _synth_metadata_via_llm_iter(query, tool_results, history, skill_instructions):
+        if ev["type"] == "_synth_meta_result":
+            result, citations = ev["result"], ev["citations"]
+    return result, citations
 
-    Returns:
-        (metadata, citations)
-        - metadata: 含 warning_level/reasoning/actions（无 answer）
-        - citations: 已校验的引用列表
+
+def _synth_metadata_via_llm_iter(
+    query: str,
+    tool_results: dict[str, Any],
+    history: list[dict[str, Any]] | None = None,
+    skill_instructions: str = "",
+):
+    """两阶段流式 Phase 1（生成器版）：带进度事件，消除长时间静默。
+
+    生成式 LLM 调用可能耗时 60-90s，期间推送 reasoning_step 事件让前端
+    可见"正在生成/校验/修正"的进度，避免用户误以为系统无响应。
+
+    校验策略（性能权衡）：
+    - 引用校验失败 → 只过滤无效引用，不触发重生成（一次坏 quote 的代价
+      不应是一整轮 60-90s 的重新调用；过滤逻辑在 _build_citations_with_metadata）
+    - 预警等级与规则引擎不一致 → 触发重生成（安全攸关），重试用尽以规则引擎为准
+
+    Yields:
+        {"type": "reasoning_step", "step": "synthesizer", "phase": "thinking|decision", ...}
+        {"type": "_synth_meta_result", "result": {...}, "citations": [...]}  # 最后一个事件
     """
     messages, source_registry = _build_synth_messages(query, tool_results, history, skill_instructions)
 
@@ -352,6 +443,9 @@ def _synth_metadata_via_llm(
 
     result: dict[str, Any] | None = None
     for attempt in range(_MAX_VERIFY_RETRIES + 1):
+        yield {"type": "reasoning_step", "step": "synthesizer", "phase": "thinking",
+               "message": "正在综合工具数据生成研判结论（等级/依据/措施）...",
+               "details": {"attempt": attempt}}
         resp = _call_synth_with_fallback(client, settings["model"], messages, schema=_SYNTH_META_SCHEMA)
         msg = resp.choices[0].message
         raw_content = (getattr(msg, "content", None) or "").strip()
@@ -371,32 +465,49 @@ def _synth_metadata_via_llm(
         _normalize_level(result)
         raw_citations = result.get("citations", []) or []
 
-        ok, feedback = _verify_citations(raw_citations, source_registry)
-        if ok:
+        yield {"type": "reasoning_step", "step": "synthesizer", "phase": "thinking",
+               "message": "正在校验引用原文真实性与预警等级一致性...",
+               "details": {"attempt": attempt, "citations": len(raw_citations)}}
+
+        # 引用：逐条校验，无效的后续统一过滤（不触发重生成）
+        cite_ok, cite_feedback = _verify_citations(raw_citations, source_registry)
+        if cite_ok:
             logger.info("[synthesizer] Phase 1 引用校验通过（attempt=%d，%d 条引用）",
                         attempt, len(raw_citations))
+        else:
+            logger.warning("[synthesizer] Phase 1 引用存在无效项，将过滤（不重生成）：%s",
+                           cite_feedback)
+
+        # 等级一致性门：不一致才触发重生成
+        level_ok, level_feedback, rule_level = _check_level_consistency(result, tool_results)
+        if level_ok:
             break
 
-        logger.warning("[synthesizer] Phase 1 引用校验失败（attempt=%d）：%s", attempt, feedback)
+        logger.warning("[synthesizer] Phase 1 等级校验失败（attempt=%d）：%s",
+                       attempt, level_feedback)
         if attempt < _MAX_VERIFY_RETRIES:
+            yield {"type": "reasoning_step", "step": "synthesizer", "phase": "decision",
+                   "message": "预警等级与规则引擎不一致，正在修正重新生成...",
+                   "details": {"attempt": attempt, "rule_level": rule_level}}
             messages.append({"role": "assistant", "content": content})
             messages.append({
                 "role": "user",
                 "content": (
-                    f"引用校验失败：{feedback}\n"
-                    "请重新生成，确保 citations 中的 quote 字段是从对应编号来源中"
-                    "逐字摘录的原文片段，ref_id 与上下文中的 [编号] 一致。"
-                    "若无法找到原文，请移除该引用而非编造。"
+                    f"校验失败：{level_feedback}\n"
+                    "请重新生成，warning_level 必须与基于工具数据的规则判定一致；"
+                    "citations 中的 quote 必须是对应编号来源中逐字摘录的原文片段，"
+                    "无法找到原文就移除该引用。"
                 ),
             })
         else:
-            logger.warning("[synthesizer] Phase 1 引用校验重试用尽，过滤无效引用")
+            logger.warning("[synthesizer] Phase 1 等级校验重试用尽，以规则引擎为准覆盖")
+            _apply_rule_level_override(result, rule_level)
 
     citations = _build_citations_with_metadata(
         result.get("citations", []) or [], source_registry
     )
     _normalize_level(result)
-    return result, citations
+    yield {"type": "_synth_meta_result", "result": result, "citations": citations}
 
 
 def _stream_answer_via_llm(
@@ -405,6 +516,7 @@ def _stream_answer_via_llm(
     metadata: dict[str, Any],
     history: list[dict[str, Any]] | None = None,
     skill_instructions: str = "",
+    valid_ref_ids: set[int] | None = None,
 ):
     """两阶段流式 Phase 2：LLM stream=True 逐 token 生成 answer。
 
@@ -412,6 +524,10 @@ def _stream_answer_via_llm(
     system prompt 使用 SYNTH_ANSWER_PROMPT（answer_only=True），要求模型只输出
     纯文本自然语言回答，避免再次输出 JSON 外壳被当作 answer 流式展示。
     <think> 块剥离状态机与 direct_chat_stream 一致（推理过程不流式推给前端）。
+
+    Args:
+        valid_ref_ids: 已验证引用（联网搜索）的编号集合；不在集合内的 [N] 标记
+            会在流式输出中即时剥离（None 表示全部剥离）。
 
     Yields:
         {"type": "answer_delta", "content": "..."}     # 真 token 流式
@@ -452,7 +568,9 @@ def _stream_answer_via_llm(
         logger.exception("[synthesizer] Phase 2 LLM 未知异常")
         raise _classify_llm_error(e) from e
 
-    # <think> 块剥离状态机（与 direct_chat_stream 一致）
+    # <think> 块剥离状态机（与 direct_chat_stream 一致），
+    # 叠加引用标记过滤：只放行对应已验证引用的 [N]，其余即时剥离
+    cite_filter = CitationMarkerFilter(valid_ref_ids=valid_ref_ids)
     filtered_answer: list[str] = []
     buffer = ""
     in_think = False
@@ -489,9 +607,14 @@ def _stream_answer_via_llm(
                 buffer = buffer[start + len("<think>"):]
                 in_think = True
         if output:
-            filtered_answer.append(output)
-            yield {"type": "answer_delta", "content": output}
+            emitted = cite_filter.feed(output)
+            if emitted:
+                filtered_answer.append(emitted)
+                yield {"type": "answer_delta", "content": emitted}
 
+    tail = cite_filter.flush()
+    if tail:
+        filtered_answer.append(tail)
     yield {"type": "synth_answer_full", "content": "".join(filtered_answer)}
 
 
@@ -582,8 +705,13 @@ def _synth_via_llm_stream(
       - {"type": "answer_delta", "content": "..."}                    # 真 token 流式
       - {"type": "synth_answer_full", "content": "..."}               # 完整 answer
     """
-    # Phase 1：非流式获取 metadata（不含 answer）
-    synth, citations = _synth_metadata_via_llm(query, tool_results, history, skill_instructions)
+    # Phase 1：非流式获取 metadata（不含 answer），透传进度事件（生成/校验/修正）
+    synth = citations = None
+    for ev in _synth_metadata_via_llm_iter(query, tool_results, history, skill_instructions):
+        if ev["type"] == "_synth_meta_result":
+            synth, citations = ev["result"], ev["citations"]
+        else:
+            yield ev  # reasoning_step 进度事件直通前端
 
     # 推送结构化元数据（前端可提前渲染等级横幅 + 引用卡片）
     yield {
@@ -596,23 +724,27 @@ def _synth_via_llm_stream(
         },
     }
 
-    # Phase 2：流式生成 answer（真 token 级）
-    yield from _stream_answer_via_llm(query, tool_results, synth, history, skill_instructions)
+    # Phase 2：流式生成 answer（真 token 级）；引用标记只保留已验证的联网来源
+    valid_ids = {c["ref_id"] for c in citations}
+    yield from _stream_answer_via_llm(
+        query, tool_results, synth, history, skill_instructions, valid_ids,
+    )
 
 
 def _format_tool_results_for_llm(
     tool_results: dict[str, Any],
 ) -> tuple[str, dict[int, dict[str, Any]]]:
-    """把工具结果格式化为 LLM 可读的编号化文本，并构建来源注册表。
+    """把工具结果格式化为 LLM 可读文本，并构建来源注册表。
 
-    所有工具结果都分配数字编号 [1][2]... 作为上下文提供给 LLM，
-    但只有 web_search 的搜索结果进入 source_registry（作为可引用来源，含 url）。
-    其他工具结果（水文/天气/径流/GIS/法规/阈值）不进入 registry，
-    即 LLM 不能引用它们作为 citation（防止把工具返回的 JSON 当作"原文引用"展示）。
+    编号策略（借鉴 Perplexica：模型看到的编号 = 用户看到的引用，天然对齐）：
+    - web_search 结果与法规检索条款带 [编号]，进入 source_registry（可引用、可校验）；
+    - 其他工具数据（水文/天气/径流/GIS/阈值）用【语义标签】替代编号——
+      模型无法给它们标 [N]，从源头杜绝"编号空间错位"导致的编造引用。
 
     source_registry 结构：
         编号 -> {source_type, title, snippet, url, text}
-    其中 text 是用于 Citation Grounding 校验的原文（snippet），LLM 的 quote 必须是其子串。
+    其中 text 是用于 Citation Grounding 校验的原文（与展示给 LLM 的文本一致），
+    LLM 的 quote 必须是其子串。
     """
     parts: list[str] = []
     registry: dict[int, dict[str, Any]] = {}
@@ -628,7 +760,7 @@ def _format_tool_results_for_llm(
         for key, val in tool_results.items():
             if not isinstance(val, dict):
                 continue
-            # 联网搜索结果：每条搜索结果一个编号，进入 source_registry（可引用）
+            # 联网搜索结果：每条一个编号，进入 source_registry（可引用）
             if "web_search" in key:
                 results = val.get("results", [])
                 parts.append(f"{key}: 搜索到 {len(results)} 条结果：")
@@ -649,7 +781,7 @@ def _format_tool_results_for_llm(
                         "url": url,
                         "text": snippet,  # Citation Grounding 校验用
                     }
-            # 法规检索结果：提供上下文但不进入 registry
+            # 法规检索结果：每条一个编号，进入 source_registry（可引用、可校验）
             elif "search_regulation" in key:
                 hits = val.get("hits", [])
                 parts.append(f"{key}: 检索到 {len(hits)} 条法规条款：")
@@ -660,10 +792,16 @@ def _format_tool_results_for_llm(
                         f"  [{ref_id}] {h.get('title', '')} {h.get('article', '')}\n"
                         f"      {content}"
                     )
-            # GIS 分析结果：提供上下文但不进入 registry
+                    registry[ref_id] = {
+                        "source_type": "regulation",
+                        "title": h.get("title", ""),
+                        "snippet": content,
+                        "url": "",
+                        "text": content,  # 与展示给 LLM 的文本一致，保证子串校验可过
+                    }
+            # GIS 分析结果：语义标签（不可引用）
             elif "query_gis_terrain" in key:
-                ref_id = _next_id()
-                gis_lines = [f"[{ref_id}] GIS 地形分析结果："]
+                gis_lines = ["【GIS 地形分析】"]
                 if val.get("slope"):
                     s = val["slope"]
                     gis_lines.append(
@@ -682,33 +820,27 @@ def _format_tool_results_for_llm(
                         f"受影响村庄 {f.get('affected_villages')} 个"
                     )
                 parts.append("\n".join(gis_lines))
-            # 水文结果：提供上下文但不进入 registry
+            # 水文结果：语义标签（不可引用）
             elif "get_hydrology" in key:
-                ref_id = _next_id()
                 snippet = _extract_hydrology_summary(val)
-                parts.append(f"[{ref_id}] {json.dumps(snippet, ensure_ascii=False)}")
-            # 天气结果：提供上下文但不进入 registry
+                parts.append(f"【实时水情】{json.dumps(snippet, ensure_ascii=False)}")
+            # 天气结果：语义标签（不可引用）
             elif "get_weather" in key:
-                ref_id = _next_id()
                 snippet = _extract_weather_summary(val)
-                parts.append(f"[{ref_id}] {json.dumps(snippet, ensure_ascii=False)}")
-            # 径流预测：提供上下文但不进入 registry
+                parts.append(f"【天气预报】{json.dumps(snippet, ensure_ascii=False)}")
+            # 径流预测：语义标签（不可引用）
             elif "predict_runoff" in key:
-                ref_id = _next_id()
                 snippet = _extract_runoff_summary(val)
-                parts.append(f"[{ref_id}] {json.dumps(snippet, ensure_ascii=False)}")
-            # 其他工具结果：提供上下文但不进入 registry
+                parts.append(f"【径流预测】{json.dumps(snippet, ensure_ascii=False)}")
+            # 其他工具结果：语义标签（不可引用）
             else:
-                ref_id = _next_id()
                 text = json.dumps(val, ensure_ascii=False)
                 if len(text) > 500:
                     text = text[:500] + "...(truncated)"
-                parts.append(f"[{ref_id}] {text}")
+                parts.append(f"【{key}】{text}")
 
-    # 追加阈值标准作为上下文（不进入 registry，不作为引用展示）
-    thresh_id = _next_id()
-    thresh_text = _build_threshold_source()
-    parts.append(f"[{thresh_id}] {thresh_text}")
+    # 追加阈值标准（语义标签，不作为引用展示）
+    parts.append(f"【预警等级阈值标准】{_build_threshold_source()}")
 
     return "\n".join(parts), registry
 

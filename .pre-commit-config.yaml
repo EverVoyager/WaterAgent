@@ -1,0 +1,37 @@
+# See https://pre-commit.com for hooks documentation
+# 安装：pip install pre-commit && pre-commit install
+# 手动运行：pre-commit run --all-files
+repos:
+  # ====== Python 代码规范 ======
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.7.1
+    hooks:
+      - id: ruff
+        args: [--check, --fix]
+      - id: ruff-format
+
+  # ====== 基础检查 ======
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        args: [--unsafe]
+      - id: check-toml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: debug-statements
+      - id: check-added-large-files
+        args: [--maxkb=500]
+
+  # ====== 前端代码规范 ======
+  - repo: local
+    hooks:
+      - id: eslint
+        name: ESLint (frontend)
+        entry: bash -c 'cd frontend && npx eslint src --ext .ts,.vue'
+        language: system
+        files: ^frontend/src/.*\.(ts|vue)$
+        pass_filenames: false
+        types: [file]

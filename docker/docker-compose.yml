@@ -88,6 +88,24 @@ services:
     ports:
       - "8080:80"
 
+  # 一次性任务：构建法规向量库（法规语料已打进镜像，embedding 走 LLM_API_KEY）。
+  # Qdrant 是持久卷，只需首次或法规更新后执行：
+  #   docker compose --profile init run --rm vector-init
+  vector-init:
+    build:
+      context: ..
+      dockerfile: docker/backend.Dockerfile
+    image: wateragents-backend   # 与 backend 服务共用镜像，不重复构建
+    profiles: ["init"]
+    env_file: .env
+    environment:
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: "6333"
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    command: python backend/build_vector_store.py
+
   train:
     build:
       context: ..

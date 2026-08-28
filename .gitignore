@@ -12,7 +12,7 @@ ENV/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-
+docs/
 # Node
 node_modules/
 dist/
