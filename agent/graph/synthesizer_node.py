@@ -409,28 +409,44 @@ def _synth_via_llm(
             logger.warning("[synthesizer] 引用存在无效项，将过滤（不重生成）：%s",
                            cite_feedback)
 
+        # 引用空缺检查：存在联网来源但模型未输出任何引用 → 视为可重试失败
+        # （评估失效模式 4：web_search 用例引用可溯源率仅 25%）
+        citations_missing = not raw_citations and _has_web_sources(source_registry)
+
         # 等级一致性门：不一致才触发重生成（安全攸关）
         level_ok, level_feedback, rule_level = _check_level_consistency(result, tool_results)
-        if level_ok:
+        if level_ok and not citations_missing:
             break
 
-        logger.warning("[synthesizer] 等级校验失败（attempt=%d）：%s", attempt, level_feedback)
         if attempt < _MAX_VERIFY_RETRIES:
             # 追加校验反馈，要求 LLM 修正后重生成
+            if not level_ok:
+                logger.warning("[synthesizer] 等级校验失败（attempt=%d）：%s",
+                               attempt, level_feedback)
+                feedback = (f"校验失败：{level_feedback}\n"
+                            "请重新生成，warning_level 必须与基于工具数据的规则判定一致；")
+            else:
+                logger.warning(
+                    "[synthesizer] citations 为空但存在联网来源（attempt=%d），触发引用补救重试",
+                    attempt,
+                )
+                feedback = ("你上次的输出缺少 citations，但上下文中存在联网搜索来源；"
+                            "凡回答使用了联网搜索内容，必须在 citations 数组中逐条给出 "
+                            "{ref_id, quote, source_type}，")
             messages.append({"role": "assistant", "content": content})
             messages.append({
                 "role": "user",
                 "content": (
-                    f"校验失败：{level_feedback}\n"
-                    "请重新生成，warning_level 必须与基于工具数据的规则判定一致；"
-                    "citations 中的 quote 必须是对应编号来源中逐字摘录的原文片段，"
-                    "无法找到原文就移除该引用。"
+                    feedback
+                    + "citations 中的 quote 必须是对应编号来源中逐字摘录的原文片段，"
+                      "无法找到原文就移除该引用。"
                 ),
             })
-        else:
+        elif not level_ok:
             # 重试用尽：以规则引擎等级覆盖
             logger.warning("[synthesizer] 等级校验重试用尽，以规则引擎为准覆盖")
             _apply_rule_level_override(result, rule_level)
+        # 引用补救重试用尽：接受空引用（宁缺毋假），不做进一步处理
 
     # 构造带元数据的引用列表
     citations = _build_citations_with_metadata(
@@ -442,6 +458,14 @@ def _synth_via_llm(
     if result.get("answer"):
         result["answer"] = strip_citation_markers(result["answer"], valid_ids)
     return result, citations
+
+
+def _has_web_sources(source_registry: dict[int, dict[str, Any]]) -> bool:
+    """来源注册表中是否存在联网搜索来源（引用空缺补救的触发条件）。"""
+    return any(
+        isinstance(s, dict) and s.get("source_type") == "web_search"
+        for s in source_registry.values()
+    )
 
 
 def _synth_metadata_via_llm(
@@ -535,30 +559,48 @@ def _synth_metadata_via_llm_iter(
             logger.warning("[synthesizer] Phase 1 引用存在无效项，将过滤（不重生成）：%s",
                            cite_feedback)
 
+        # 引用空缺检查：存在联网来源但模型未输出任何引用 → 视为可重试失败
+        # （评估失效模式 4，与非流式路径同策略）
+        citations_missing = not raw_citations and _has_web_sources(source_registry)
+
         # 等级一致性门：不一致才触发重生成
         level_ok, level_feedback, rule_level = _check_level_consistency(result, tool_results)
-        if level_ok:
+        if level_ok and not citations_missing:
             break
 
-        logger.warning("[synthesizer] Phase 1 等级校验失败（attempt=%d）：%s",
-                       attempt, level_feedback)
         if attempt < _MAX_VERIFY_RETRIES:
-            yield {"type": "reasoning_step", "step": "synthesizer", "phase": "decision",
-                   "message": "预警等级与规则引擎不一致，正在修正重新生成...",
-                   "details": {"attempt": attempt, "rule_level": rule_level}}
+            if not level_ok:
+                logger.warning("[synthesizer] Phase 1 等级校验失败（attempt=%d）：%s",
+                               attempt, level_feedback)
+                yield {"type": "reasoning_step", "step": "synthesizer", "phase": "decision",
+                       "message": "预警等级与规则引擎不一致，正在修正重新生成...",
+                       "details": {"attempt": attempt, "rule_level": rule_level}}
+                feedback = (f"校验失败：{level_feedback}\n"
+                            "请重新生成，warning_level 必须与基于工具数据的规则判定一致；")
+            else:
+                logger.warning(
+                    "[synthesizer] Phase 1 citations 为空但存在联网来源（attempt=%d），触发引用补救重试",
+                    attempt,
+                )
+                yield {"type": "reasoning_step", "step": "synthesizer", "phase": "decision",
+                       "message": "检测到联网来源未标注引用，正在补充引用...",
+                       "details": {"attempt": attempt}}
+                feedback = ("你上次的输出缺少 citations，但上下文中存在联网搜索来源；"
+                            "凡回答使用了联网搜索内容，必须在 citations 数组中逐条给出 "
+                            "{ref_id, quote, source_type}，")
             messages.append({"role": "assistant", "content": content})
             messages.append({
                 "role": "user",
                 "content": (
-                    f"校验失败：{level_feedback}\n"
-                    "请重新生成，warning_level 必须与基于工具数据的规则判定一致；"
-                    "citations 中的 quote 必须是对应编号来源中逐字摘录的原文片段，"
-                    "无法找到原文就移除该引用。"
+                    feedback
+                    + "citations 中的 quote 必须是对应编号来源中逐字摘录的原文片段，"
+                      "无法找到原文就移除该引用。"
                 ),
             })
-        else:
+        elif not level_ok:
             logger.warning("[synthesizer] Phase 1 等级校验重试用尽，以规则引擎为准覆盖")
             _apply_rule_level_override(result, rule_level)
+        # 引用补救重试用尽：接受空引用（宁缺毋假）
 
     citations = _build_citations_with_metadata(
         result.get("citations", []) or [], source_registry

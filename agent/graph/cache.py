@@ -39,13 +39,25 @@ def _cache_key(tool_name: str, arguments: dict[str, Any]) -> str:
         return f"{tool_name}:{arguments}"
 
 
+def clear_tool_result_cache() -> None:
+    """清空工具结果缓存。
+
+    评估回放上下文切换 case 时调用：前一个 case 的 overrides 结果
+    若残留在 TTL 缓存中，会被同参数的下一个 case 命中，破坏确定性回放。
+    """
+    _TOOL_RESULT_CACHE.clear()
+
+
 def _cached_execute_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     """带缓存的工具执行。仅缓存幂等工具，TTL 5 分钟。
 
     注意：hydrology/weather 已有各自的内部缓存（30min/10min），
     本层缓存是针对同一会话内 LLM 重复决策同一调用的快速命中。
+    评估回放期间绕过缓存：回放要求每次调用都按当前 case 的 overrides 重新生成。
     """
-    if tool_name not in _CACHEABLE_TOOLS:
+    from agent.tools.mock_executor import is_replay_active
+
+    if is_replay_active() or tool_name not in _CACHEABLE_TOOLS:
         return execute_tool(tool_name, arguments)
 
     key = _cache_key(tool_name, arguments)

@@ -19,6 +19,8 @@ def _mock_planner_llm_no_tools():
     resp = MagicMock()
     resp.choices = [MagicMock()]
     resp.choices[0].message.tool_calls = None
+    # 救援解析会读取正文（FC 为空时尝试从文本抢救工具调用）
+    resp.choices[0].message.content = ""
     create_mock.chat.completions.create.return_value = resp
 
     client_mock = MagicMock()

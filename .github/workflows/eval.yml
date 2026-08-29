@@ -1,0 +1,61 @@
+name: Eval
+
+# 系统级评估（模型+Harness 组合体）：手动触发。
+# 全程确定性 mock 回放工具，无需 MySQL/Qdrant；仅需 LLM_API_KEY。
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "用例截断数（0=全量 62 条）"
+        required: false
+        default: "0"
+      update_baseline:
+        description: "更新基线（评审通过后勾选；否则与基线回归门禁对比）"
+        required: false
+        default: "false"
+        type: boolean
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run system eval
+        env:
+          PYTHONPATH: .
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_BASE_URL: ${{ vars.LLM_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1' }}
+          LLM_MODEL: ${{ vars.LLM_MODEL || 'qwen-plus' }}
+          # 评判模型独立配置（与主模型异源，规避同源自我偏好）
+          LLM_JUDGE_MODEL: ${{ vars.LLM_JUDGE_MODEL || 'qwen-max' }}
+          AMAP_API_KEY: ""
+          QDRANT_HOST: "127.0.0.1"
+          QDRANT_PORT: "6333"
+        run: |
+          ARGS=""
+          LIMIT="${{ github.event.inputs.limit || '0' }}"
+          if [ "$LIMIT" != "0" ]; then ARGS="$ARGS --limit $LIMIT"; fi
+          UPDATE="${{ github.event.inputs.update_baseline || 'false' }}"
+          if [ "$UPDATE" = "true" ]; then ARGS="$ARGS --update-baseline"; fi
+          python evals/run_eval.py $ARGS
+
+      - name: Upload eval report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: evals/history/

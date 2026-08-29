@@ -11,6 +11,8 @@
 - production：关键业务工具真实实现不可用时硬失败（raise），避免防汛决策基于模拟数据
 """
 import random
+import threading
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -267,6 +269,58 @@ def _mock_generate_plan(params: GeneratePlanParams, overrides: dict | None = Non
 
 # ====== 执行器入口 ======
 
+# 评估回放上下文（evals/ 使用）：激活后所有工具强制走 mock 分支并按
+# case 注入 overrides+seed，保证"评估环境状态可重置、结果可复现"。
+# 用模块级全局而非 contextvars：graph 内 ThreadPoolExecutor 不传播上下文变量；
+# 评估按 case 顺序执行无竞争，锁仅防多线程评估器误用。
+_REPLAY_LOCK = threading.Lock()
+_REPLAY_ACTIVE = False
+_REPLAY_OVERRIDES: dict[str, dict[str, Any]] = {}
+_REPLAY_SEED: int | None = None
+
+
+def set_replay_context(
+    overrides_by_tool: dict[str, dict[str, Any]] | None = None,
+    seed: int | None = None,
+) -> None:
+    """激活回放上下文：overrides_by_tool 为 工具名->覆盖值 映射，seed 为全局随机种子。"""
+    global _REPLAY_ACTIVE, _REPLAY_OVERRIDES, _REPLAY_SEED
+    with _REPLAY_LOCK:
+        _REPLAY_ACTIVE = True
+        _REPLAY_OVERRIDES = dict(overrides_by_tool or {})
+        _REPLAY_SEED = seed
+    # 回放环境切换必须清工具结果缓存，否则前一个 case 的结果会经 TTL 缓存串入
+    from agent.graph.cache import clear_tool_result_cache
+    clear_tool_result_cache()
+
+
+def clear_replay_context() -> None:
+    """退出回放上下文，恢复正常执行路径（真实实现优先）。"""
+    global _REPLAY_ACTIVE, _REPLAY_OVERRIDES, _REPLAY_SEED
+    with _REPLAY_LOCK:
+        _REPLAY_ACTIVE = False
+        _REPLAY_OVERRIDES = {}
+        _REPLAY_SEED = None
+
+
+def is_replay_active() -> bool:
+    with _REPLAY_LOCK:
+        return _REPLAY_ACTIVE
+
+
+@contextmanager
+def replay_context(
+    overrides_by_tool: dict[str, dict[str, Any]] | None = None,
+    seed: int | None = None,
+):
+    """回放上下文管理器：with 内工具走确定性 mock 回放，退出自动恢复。"""
+    set_replay_context(overrides_by_tool, seed)
+    try:
+        yield
+    finally:
+        clear_replay_context()
+
+
 # list_skills 透传占位：无外部依赖，直接走 real_executor（不降级 mock）
 _PASSTHROUGH_TOOLS = {"list_skills"}
 
@@ -330,6 +384,19 @@ def execute_tool(
     if tool_name not in _MOCK_IMPLEMENTATIONS:
         raise ValueError(f"Unknown tool: {tool_name}")
 
+    # 评估回放上下文激活时：强制走 mock 分支（真实实现返回非确定数据会破坏
+    # "可重置可复现"的评估环境约定），overrides/seed 取自回放上下文。
+    # 显式传入的 overrides/seed（训练侧用法）优先级更高，不受影响。
+    if overrides is None and seed is None:
+        with _REPLAY_LOCK:
+            replay_on = _REPLAY_ACTIVE
+            ctx_overrides = _REPLAY_OVERRIDES.get(tool_name)
+            ctx_seed = _REPLAY_SEED
+        if replay_on:
+            overrides, seed = ctx_overrides, ctx_seed
+    else:
+        replay_on = False
+
     # 训练侧确定性：设全局种子（仅 mock 分支依赖 random）
     if seed is not None:
         random.seed(seed)
@@ -337,7 +404,7 @@ def execute_tool(
     # overrides/seed 是训练侧确定性回放信号：跳过 real 分支，直接走 mock，
     # 避免真实实现（如 qqjjsj.com 爬虫）返回非确定数据覆盖 overrides。
     # 正常运行（overrides=seed=None）仍优先 real_executor。
-    if overrides is None and seed is None:
+    if overrides is None and seed is None and not replay_on:
         # 优先尝试真实实现（阶段 D 起：search_regulation 走 RAG）
         try:
             from agent.tools.real_executor import real_execute_tool

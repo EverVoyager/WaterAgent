@@ -50,6 +50,7 @@
 - [Docker 部署](#-docker-部署)
 - [项目结构](#-项目结构)
 - [测试与质量](#%EF%B8%8F-测试与质量)
+- [系统级评估](#-系统级评估)
 - [贡献](#-贡献)
 - [许可证](#-许可证)
 
@@ -443,6 +444,7 @@ WaterAgents/
 │   ├── prompts/                    # 系统提示词（分模块）
 │   └── tracing/                    # LangFuse 追踪
 ├── train/                          # 微调管线（data_gen/lora/grpo/rewards/eval/tests）
+├── evals/                          # 系统级评估（用例/回放/指标/Judge/消融/回归门禁）
 ├── models/                         # 微调产物（合并权重，gitignore）
 ├── backend/
 │   ├── app/api/                    # FastAPI 路由（agent/health/sessions/memories/skills）
@@ -472,6 +474,43 @@ cd frontend && npm run test && npm run lint
 - 后端 20+ 测试文件：工作流路由、SSE 桥接、引用校验、上下文压缩、工具降级、记忆治理、Skill 导入安全等
 - 训练管线 15 个测试文件：场景确定性、种子隔离、Hermes 往返、三道过滤、奖励函数等
 - CI（GitHub Actions）：ruff + pytest（含真实 MySQL service）+ 前端 vue-tsc / ESLint / Vitest / Build
+
+## 📊 系统级评估
+
+与 `train/eval`（裸模型合成循环，评微调效果）互补，`evals/` 评估**模型 + Harness 组合体**：驱动真实 Agent 链路（planner → executor → synthesizer，含记忆注入），方法论对齐《AI Agents in Depth》第 6 章「Agent 的评估」（τ-bench / RAGAS / Scale AI / AndroidWorld 等实践）。
+
+```bash
+# 冒烟（8 条，确定性指标，--no-judge）
+python evals/run_eval.py --limit 8
+
+# 全量 62 条：30 业务研判 + 10 闲聊 + 8 法规 + 8 联网 + 6 陷阱
+python evals/run_eval.py
+
+# 全量 + LLM Judge 软指标 + pass^3 稳定性 + 记忆消融
+python evals/run_eval.py --judge --pass-k --ablation 20
+
+# 更新基线（人工评审报告后执行；之后每次评估自动做回归门禁）
+python evals/run_eval.py --update-baseline
+```
+
+**评估环境五要素**：确定性数据集（`evals/cases.py`）｜可重置环境状态（`evals/replay.py`：overrides+seed 注入 mock_executor，工具缓存旁路）｜原子工具接口｜评分标准（确定性规则 + Rubric 式 Judge）｜执行协议（`evals/runner.py` 顺序驱动、单条失败不中断）。
+
+**指标体系**（过程 / 结果 / 安全三层，全部附 95% 置信区间）：
+
+| 层 | 指标 | 说明 |
+| --- | --- | --- |
+| 结果 | `level_accuracy` / `pass^3` | 预警等级 vs 规则引擎真值（精确 + 相邻宽容两口径）；同一用例 3 次全对比例测稳定性 |
+| 过程 | `intent` / `tool_precision/recall` / `sequence_validity` / `latency p50-p95` | 意图识别、期望工具集、weather→runoff→plan 顺序合法性、成本代理 |
+| 安全 | `trap_resistance` / `citation_precision` | 陷阱任务抵抗率（用户声称Ⅰ级但数据Ⅳ级，是否坚持数据锚定）；引用 quote 独立复核 |
+
+**关键机制**：
+
+- **种子隔离**：评估种子区间 `[300_000, 400_000)`，与 SFT / GRPO / 裸模型评估三段零重叠（防评估集泄漏）
+- **能力标签矩阵**：每条用例标注能力（意图/工具/等级/引用/抗误导），报告按 任务 × 能力 出矩阵，定位结构性短板而非只看总分
+- **Rubric 式 Judge**：必要/重要/可选/陷阱四档加权，**编造数值是一票否决项**；评判模型 `LLM_JUDGE_MODEL`（默认 qwen-max）与主模型异源，规避自我偏好；`--no-judge` 纯确定性
+- **记忆消融**：`--ablation N` 有/无记忆注入各跑一遍，量化五类记忆架构的净贡献（分差超噪声带宽才算显著）
+- **回归门禁**：与 `evals/baselines/baseline.json` 配对对比，阈值 = max(固定下限, 2×SE)——分差落在噪声带宽内不下结论；门禁触发退出码 1
+- **CI**：GitHub Actions 手动触发（`eval.yml`），报告上传 artifact
 
 ## 🤝 贡献
 

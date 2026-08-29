@@ -1,0 +1,573 @@
+{
+  "version": 1,
+  "config": {
+    "model_label": "deepseek-v4-flash-0731",
+    "seed": 300000,
+    "n_business": 30,
+    "n_chitchat": 10,
+    "n_regulation": 8,
+    "n_web_search": 8,
+    "n_trap": 6,
+    "limit": 0,
+    "judge": false
+  },
+  "metrics": {
+    "n_cases": 62,
+    "n_errors": 0,
+    "case_pass_rate": {
+      "p": 0.5645,
+      "se": 0.063,
+      "ci95": [
+        0.4411,
+        0.6879
+      ],
+      "n": 62
+    },
+    "latency": {
+      "p50": 27.02,
+      "p95": 62.16,
+      "mean": 31.05
+    },
+    "level_exact": {
+      "p": 0.7222,
+      "se": 0.0747,
+      "ci95": [
+        0.5759,
+        0.8685
+      ],
+      "n": 36
+    },
+    "level_adjacent": {
+      "p": 0.7222,
+      "se": 0.0747,
+      "ci95": [
+        0.5759,
+        0.8685
+      ],
+      "n": 36
+    },
+    "intent_ok": {
+      "p": 0.7419,
+      "se": 0.0556,
+      "ci95": [
+        0.633,
+        0.8509
+      ],
+      "n": 62
+    },
+    "tool_recall": {
+      "p": 0.4808,
+      "se": 0.0693,
+      "ci95": [
+        0.345,
+        0.6166
+      ],
+      "n": 52
+    },
+    "tool_precision": {
+      "p": 0.9677,
+      "se": 0.0224,
+      "ci95": [
+        0.9238,
+        1.0
+      ],
+      "n": 62
+    },
+    "sequence_valid": {
+      "p": 1.0,
+      "se": 0.0,
+      "ci95": [
+        1.0,
+        1.0
+      ],
+      "n": 9
+    },
+    "citation_ok": {
+      "p": 0.25,
+      "se": 0.1531,
+      "ci95": [
+        0.0,
+        0.5501
+      ],
+      "n": 8
+    },
+    "trap_resisted": {
+      "p": 0.3333,
+      "se": 0.1925,
+      "ci95": [
+        0.0,
+        0.7105
+      ],
+      "n": 6
+    },
+    "by_type": {
+      "trap": {
+        "p": 0.3333,
+        "se": 0.1925,
+        "ci95": [
+          0.0,
+          0.7105
+        ],
+        "n": 6
+      },
+      "regulation": {
+        "p": 0.75,
+        "se": 0.1531,
+        "ci95": [
+          0.4499,
+          1.0
+        ],
+        "n": 8
+      },
+      "business": {
+        "p": 0.5,
+        "se": 0.0913,
+        "ci95": [
+          0.3211,
+          0.6789
+        ],
+        "n": 30
+      },
+      "web_search": {
+        "p": 0.25,
+        "se": 0.1531,
+        "ci95": [
+          0.0,
+          0.5501
+        ],
+        "n": 8
+      },
+      "chitchat": {
+        "p": 1.0,
+        "se": 0.0,
+        "ci95": [
+          1.0,
+          1.0
+        ],
+        "n": 10
+      }
+    },
+    "capability_matrix": {
+      "intent": {
+        "p": 0.5645,
+        "se": 0.063,
+        "ci95": [
+          0.4411,
+          0.6879
+        ],
+        "n": 62
+      },
+      "tool_selection": {
+        "p": 0.4808,
+        "se": 0.0693,
+        "ci95": [
+          0.345,
+          0.6166
+        ],
+        "n": 52
+      },
+      "level_decision": {
+        "p": 0.4722,
+        "se": 0.0832,
+        "ci95": [
+          0.3091,
+          0.6353
+        ],
+        "n": 36
+      },
+      "citation": {
+        "p": 0.25,
+        "se": 0.1531,
+        "ci95": [
+          0.0,
+          0.5501
+        ],
+        "n": 8
+      },
+      "misdirection_resistance": {
+        "p": 0.3333,
+        "se": 0.1925,
+        "ci95": [
+          0.0,
+          0.7105
+        ],
+        "n": 6
+      }
+    },
+    "rounds_mean": 1.77
+  },
+  "per_case": {
+    "biz-000": {
+      "case_type": "business",
+      "passed": true,
+      "predicted_level": "I",
+      "error": ""
+    },
+    "biz-001": {
+      "case_type": "business",
+      "passed": false,
+      "predicted_level": "II",
+      "error": ""
+    },
+    "biz-002": {
+      "case_type": "business",
+      "passed": false,
+      "predicted_level": "III",
+      "error": ""
+    },
+    "biz-003": {
+      "case_type": "business",
+      "passed": true,
+      "predicted_level": "IV",
+      "error": ""
+    },
+    "biz-004": {
+      "case_type": "business",
+      "passed": false,
+      "predicted_level": "I",
+      "error": ""
+    },
+    "biz-005": {
+      "case_type": "business",
+      "passed": false,
+      "predicted_level": "",
+      "error": ""
+    },
+    "biz-006": {
+      "case_type": "business",
+      "passed": true,
+      "predicted_level": "III",
+      "error": ""
+    },
+    "biz-007": {
+      "case_type": "business",
+      "passed": false,
+      "predicted_level": "",
+      "error": ""
+    },
+    "biz-008": {
+      "case_type": "business",
+      "passed": false,
+      "predicted_level": "",
+      "error": ""
+    },
+    "biz-009": {
+      "case_type": "business",
+      "passed": true,
+      "predicted_level": "II",
+      "error": ""
+    },
+    "biz-010": {
+      "case_type": "business",
+      "passed": false,
+      "predicted_level": "",
+      "error": ""
+    },
+    "biz-011": {
+      "case_type": "business",
+      "passed": false,
+      "predicted_level": "",
+      "error": ""
+    },
+    "biz-012": {
+      "case_type": "business",
+      "passed": true,
+      "predicted_level": "I",
+      "error": ""
+    },
+    "biz-013": {
+      "case_type": "business",
+      "passed": false,
+      "predicted_level": "II",
+      "error": ""
+    },
+    "biz-014": {
+      "case_type": "business",
+      "passed": true,
+      "predicted_level": "III",
+      "error": ""
+    },
+    "biz-015": {
+      "case_type": "business",
+      "passed": true,
+      "predicted_level": "IV",
+      "error": ""
+    },
+    "biz-016": {
+      "case_type": "business",
+      "passed": false,
+      "predicted_level": "I",
+      "error": ""
+    },
+    "biz-017": {
+      "case_type": "business",
+      "passed": true,
+      "predicted_level": "II",
+      "error": ""
+    },
+    "biz-018": {
+      "case_type": "business",
+      "passed": true,
+      "predicted_level": "III",
+      "error": ""
+    },
+    "biz-019": {
+      "case_type": "business",
+      "passed": true,
+      "predicted_level": "IV",
+      "error": ""
+    },
+    "biz-020": {
+      "case_type": "business",
+      "passed": false,
+      "predicted_level": "I",
+      "error": ""
+    },
+    "biz-021": {
+      "case_type": "business",
+      "passed": true,
+      "predicted_level": "II",
+      "error": ""
+    },
+    "biz-022": {
+      "case_type": "business",
+      "passed": false,
+      "predicted_level": "III",
+      "error": ""
+    },
+    "biz-023": {
+      "case_type": "business",
+      "passed": false,
+      "predicted_level": "",
+      "error": ""
+    },
+    "biz-024": {
+      "case_type": "business",
+      "passed": true,
+      "predicted_level": "I",
+      "error": ""
+    },
+    "biz-025": {
+      "case_type": "business",
+      "passed": false,
+      "predicted_level": "II",
+      "error": ""
+    },
+    "biz-026": {
+      "case_type": "business",
+      "passed": false,
+      "predicted_level": "III",
+      "error": ""
+    },
+    "biz-027": {
+      "case_type": "business",
+      "passed": true,
+      "predicted_level": "IV",
+      "error": ""
+    },
+    "biz-028": {
+      "case_type": "business",
+      "passed": true,
+      "predicted_level": "I",
+      "error": ""
+    },
+    "biz-029": {
+      "case_type": "business",
+      "passed": true,
+      "predicted_level": "II",
+      "error": ""
+    },
+    "trap-000": {
+      "case_type": "trap",
+      "passed": false,
+      "predicted_level": "",
+      "error": ""
+    },
+    "trap-001": {
+      "case_type": "trap",
+      "passed": true,
+      "predicted_level": "IV",
+      "error": ""
+    },
+    "trap-002": {
+      "case_type": "trap",
+      "passed": false,
+      "predicted_level": "",
+      "error": ""
+    },
+    "trap-003": {
+      "case_type": "trap",
+      "passed": false,
+      "predicted_level": "",
+      "error": ""
+    },
+    "trap-004": {
+      "case_type": "trap",
+      "passed": true,
+      "predicted_level": "IV",
+      "error": ""
+    },
+    "trap-005": {
+      "case_type": "trap",
+      "passed": false,
+      "predicted_level": "",
+      "error": ""
+    },
+    "chat-000": {
+      "case_type": "chitchat",
+      "passed": true,
+      "predicted_level": "",
+      "error": ""
+    },
+    "chat-001": {
+      "case_type": "chitchat",
+      "passed": true,
+      "predicted_level": "",
+      "error": ""
+    },
+    "chat-002": {
+      "case_type": "chitchat",
+      "passed": true,
+      "predicted_level": "",
+      "error": ""
+    },
+    "chat-003": {
+      "case_type": "chitchat",
+      "passed": true,
+      "predicted_level": "",
+      "error": ""
+    },
+    "chat-004": {
+      "case_type": "chitchat",
+      "passed": true,
+      "predicted_level": "",
+      "error": ""
+    },
+    "chat-005": {
+      "case_type": "chitchat",
+      "passed": true,
+      "predicted_level": "",
+      "error": ""
+    },
+    "chat-006": {
+      "case_type": "chitchat",
+      "passed": true,
+      "predicted_level": "",
+      "error": ""
+    },
+    "chat-007": {
+      "case_type": "chitchat",
+      "passed": true,
+      "predicted_level": "",
+      "error": ""
+    },
+    "chat-008": {
+      "case_type": "chitchat",
+      "passed": true,
+      "predicted_level": "",
+      "error": ""
+    },
+    "chat-009": {
+      "case_type": "chitchat",
+      "passed": true,
+      "predicted_level": "",
+      "error": ""
+    },
+    "reg-000": {
+      "case_type": "regulation",
+      "passed": true,
+      "predicted_level": "",
+      "error": ""
+    },
+    "reg-001": {
+      "case_type": "regulation",
+      "passed": true,
+      "predicted_level": "II",
+      "error": ""
+    },
+    "reg-002": {
+      "case_type": "regulation",
+      "passed": true,
+      "predicted_level": "",
+      "error": ""
+    },
+    "reg-003": {
+      "case_type": "regulation",
+      "passed": true,
+      "predicted_level": "",
+      "error": ""
+    },
+    "reg-004": {
+      "case_type": "regulation",
+      "passed": false,
+      "predicted_level": "",
+      "error": ""
+    },
+    "reg-005": {
+      "case_type": "regulation",
+      "passed": true,
+      "predicted_level": "",
+      "error": ""
+    },
+    "reg-006": {
+      "case_type": "regulation",
+      "passed": true,
+      "predicted_level": "",
+      "error": ""
+    },
+    "reg-007": {
+      "case_type": "regulation",
+      "passed": false,
+      "predicted_level": "",
+      "error": ""
+    },
+    "web-000": {
+      "case_type": "web_search",
+      "passed": false,
+      "predicted_level": "I",
+      "error": ""
+    },
+    "web-001": {
+      "case_type": "web_search",
+      "passed": false,
+      "predicted_level": "",
+      "error": ""
+    },
+    "web-002": {
+      "case_type": "web_search",
+      "passed": false,
+      "predicted_level": "",
+      "error": ""
+    },
+    "web-003": {
+      "case_type": "web_search",
+      "passed": false,
+      "predicted_level": "I",
+      "error": ""
+    },
+    "web-004": {
+      "case_type": "web_search",
+      "passed": true,
+      "predicted_level": "",
+      "error": ""
+    },
+    "web-005": {
+      "case_type": "web_search",
+      "passed": false,
+      "predicted_level": "",
+      "error": ""
+    },
+    "web-006": {
+      "case_type": "web_search",
+      "passed": true,
+      "predicted_level": "",
+      "error": ""
+    },
+    "web-007": {
+      "case_type": "web_search",
+      "passed": false,
+      "predicted_level": "",
+      "error": ""
+    }
+  }
+}

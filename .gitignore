@@ -75,3 +75,6 @@ htmlcov/
 
 # 文档
 docs/
+# 系统级评估历史（报告/明细不入库；baseline.json 保留跟踪）
+evals/history/
+evals/FINDINGS.md

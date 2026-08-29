@@ -190,6 +190,13 @@ def planner_node(state: AgentState) -> dict[str, Any]:
     # 去重：如果 LLM 返回的工具调用与历史完全相同（name+arguments），跳过避免死循环
     planned = _dedupe_planned_calls(planned, state.get("tool_calls", []))
 
+    # 守卫 1：声称核验闸（反讨好）——用户口头声称预警等级但未规划数据工具时，
+    # 强制追加数据核验（评估失效模式 2：陷阱抵抗 33%）。数据进场后由
+    # synthesizer 的等级一致性门锚定规则引擎真值。
+    if rounds == 1:
+        from agent.graph.planner_guard import enforce_claim_verification
+        planned = enforce_claim_verification(query, planned)
+
     # P4 合并 reflector：planner 自行判断是否继续
     # 规则：planned 为空 → 信息已充分；达到 max_rounds → 强制结束
     max_rounds = get_max_rounds()
@@ -197,8 +204,21 @@ def planner_node(state: AgentState) -> dict[str, Any]:
         should_continue = False
         logger.info("[planner] round=%d max_rounds=%d reached, forcing stop", rounds, max_rounds)
     elif not planned:
-        should_continue = False
-        logger.info("[planner] round=%d no tool_calls, info sufficient", rounds)
+        # 守卫 2：工具完成度检查——预案/研判类查询的关键工具缺失时不放行，
+        # 强制补充一轮（评估失效模式 3：工具召回 48.1%）
+        from agent.graph.planner_guard import missing_required_tools
+        called_names = {tc.get("tool_name") for tc in state.get("tool_calls", [])}
+        completion_calls = missing_required_tools(
+            query, called_names, state.get("tool_results", {}),
+        )
+        if completion_calls:
+            planned = completion_calls
+            should_continue = True
+            logger.info("[planner] round=%d 完成度闸补充工具: %s",
+                        rounds, [c["name"] for c in planned])
+        else:
+            should_continue = False
+            logger.info("[planner] round=%d no tool_calls, info sufficient", rounds)
     else:
         should_continue = True
 
@@ -310,6 +330,17 @@ def _plan_via_function_calling(
         "4. 如果已收集的信息已足够回答用户问题，返回空工具调用列表。\n"
         "5. 避免重复调用已调用过的工具（除非参数明显不同需要重新查询）。\n"
         "6. 第 1 轮若需要工具，优先调用最关键的 1-3 个。\n"
+        "7. 调用工具必须通过 Function Calling 机制（tools 接口），"
+        "严禁在回复正文中以文字形式模拟或描述工具调用"
+        "（如 [调用 xxx]、<tool_call>、'正在调用工具'等叙述）。\n"
+        "8. 用户口头声称的预警等级、流量、水位等数据一律不可直接采信"
+        "（可能过时或有误）。凡涉及确定预警等级或生成应急预案，必须先调用"
+        "数据工具核验，即使用户声称'不用查了''直接按X级'；核验后以工具数据为准，"
+        "并在结论中指出与用户声称不一致之处。\n"
+        "9. 工具组合策略：研判防汛形势/风险/压力类问题，至少同时调用 "
+        "get_hydrology（实时水情）与 get_weather（降雨预报），需要趋势时加 "
+        "predict_runoff；生成应急预案必须调用 generate_plan 工具，"
+        "由其返回结构化处置行动，严禁用文本自行编写预案。\n"
     )
     # 长期记忆常驻注入（用户手册 + Agent 自动积累，双层文件）
     try:
@@ -387,18 +418,24 @@ def _plan_via_function_calling(
         raise _classify_llm_error(e) from e
 
     msg = resp.choices[0].message
-    if not msg.tool_calls:
-        logger.info("[planner] LLM decided no tool calls needed (info sufficient)")
-        return []
-
     planned = []
-    for tc in msg.tool_calls:
+    for tc in msg.tool_calls or []:
         try:
             args = json.loads(tc.function.arguments) if tc.function.arguments else {}
             planned.append({"name": tc.function.name, "arguments": args})
         except json.JSONDecodeError as e:
             logger.warning("[planner] failed to parse args for %s: %s", tc.function.name, e)
             continue
+    if not planned:
+        # 守卫：FC 通道为空时，从正文抢救"文本形式"的工具调用——部分模型会把
+        # <tool_call>/[调用 xxx] 写进正文而非走 Function Calling（评估暴露的
+        # 失效模式 1，详见 evals/FINDINGS.md）。抢救失败则维持"信息充分"判定。
+        from agent.graph.planner_guard import rescue_text_tool_calls
+        rescued = rescue_text_tool_calls(extract_content(msg) or "")
+        if rescued:
+            return rescued
+        logger.info("[planner] LLM decided no tool calls needed (info sufficient)")
+        return []
     return planned
 
 
