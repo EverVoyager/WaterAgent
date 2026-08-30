@@ -2,77 +2,56 @@
 
 **微调开源大模型 → LlamaFactory 本地部署 → Agent 洪水预警**
 
-一条完整的水利垂直大模型落地链路：先对开源大模型（Qwen3-4B）进行领域微调，
-使其成为水利 / 防汛专用大模型；再通过 LlamaFactory 在本地部署推理服务；
-最终接入 LangGraph Agent，融合实时水情、天气、径流模型、法规 RAG 与 GIS 地形，
-面向黄河吕梁段（重点吴堡、龙门水文站）输出预警等级（Ⅰ~Ⅳ）、研判依据与应急措施。
+对 Qwen3-4B 做水利 / 防汛领域微调，经 LlamaFactory 在本地部署为推理服务，
+再接入 LangGraph Agent：融合实时水情、天气、径流模型、法规 RAG 与 GIS 地形，
+面向黄河吕梁段（吴堡、龙门水文站）输出预警等级（Ⅰ~Ⅳ）、研判依据与应急措施。
 
-## 🎯 项目主线
+## 项目主线
 
-```
-┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐
-│  第一步：领域微调  │    │ 第二步：本地部署   │    │ 第三步：Agent 预警│
-│                  │    │                  │    │                  │
-│ Self-Instruct    │    │ 合并权重         │    │ LangGraph 状态机  │
-│ 数据管线         │───▶│ LlamaFactory     │───▶│ 8 个业务工具      │
-│ SFT + DPO + GRPO │    │ OpenAI 兼容 API  │    │ 洪水预警研判      │
-│ 水利专用大模型     │    │ （可换 vLLM 等）  │    │ （详见后文）      │
-└──────────────────┘    └──────────────────┘    └──────────────────┘
-```
+- **[第一步：微调水利专用大模型](#第一步微调水利专用大模型)** —— 把云端强模型（qwen-plus）的 Agent 能力蒸馏进本地开源模型：Self-Instruct 数据管线 + SFT / DPO / GRPO
+- **[第二步：LlamaFactory 本地部署](#第二步llamafactory-本地部署)** —— 微调产物合并权重，LlamaFactory（可换 vLLM）起 OpenAI 兼容 API
+- **[第三步：Agent 洪水预警](#第三步agent-洪水预警)** —— LangGraph 状态机调度 8 个业务工具，接入多源实时数据，输出预警等级 / 研判依据 / 应急措施
 
-- **[第一步：微调水利专用大模型](#%EF%B8%8F-第一步微调水利专用大模型)** —— 把云端强模型（qwen-plus）的 Agent 能力蒸馏进本地开源模型
-- **[第二步：LlamaFactory 本地部署](#-第二步llamafactory-本地部署)** —— 微调产物经 LlamaFactory 起本地推理服务，OpenAI 兼容 API 即刻可用
-- **[第三步：Agent 洪水预警](#-第三步agent-洪水预警)** —— 接入多源实时数据，输出预警等级 / 研判依据 / 应急措施
+## 特性
 
-## ✨ 特性亮点
+- 微调管线：Self-Instruct 种子扩张 → 场景参数化（等级真值）→ 双模型蒸馏 → 三道硬过滤 → LLM-as-Judge → SFT + DPO + GRPO（纯规则奖励），QLoRA 在 RTX 4060 单卡可跑
+- 本地部署：微调产物经 LlamaFactory 起 OpenAI 兼容服务，后端改两项配置即完成接入；也支持 vLLM
+- 工具编排：无关键词路由，planner 原生 Function Calling 自主规划多轮工具调用（去重 / 轮次控制 / 跨工具数据流注入），并发执行 + TTL 缓存
+- 真实数据源：水文爬虫（qqjjsj.com）、高德天气、Tavily 联网搜索、Qdrant 法规 RAG、SRTM DEM 地形分析、SCS-CN 降雨径流模型；生产环境真实源失败硬失败，不静默降级 mock
+- 两阶段流式 SSE：先推结构化预警卡（等级 / 依据 / 措施 / 引用），再逐 token 流式答案；15s 心跳保活 + 客户端断连协作式取消
+- 五类记忆：会话（上下文压缩）、长期（MEMORY.md 用户手册 Agent 只读 + memory/ 自动记忆目录）、语义 / 情景 / 程序（MySQL + Qdrant 向量检索）；反思异步写入、Curator 定期治理、程序记忆可晋升 Skill
+- Skill 系统：description embedding 匹配按需加载、工具子集隔离，支持 SKILL.md / .zip 导入（含 ZIP 炸弹与路径穿越防护）
+- 引用溯源：引用必须逐字来自来源原文，编造的直接过滤
+- 工程兜底：结构化输出三级降级 + 4 级 JSON 修复、上下文压缩（Codex compact）、`<think>` 剥离、LLM 异常分类传播前端、限流 / CORS / 配置校验
 
-- 🏋️ **完整微调管线（项目主线）** —— Self-Instruct 种子扩张 → 场景参数化（等级真值）→ 双模型蒸馏 → 三道硬过滤 → LLM-as-Judge → SFT + DPO + GRPO（纯规则奖励），QLoRA 单卡（RTX 4060）可跑，开源模型变成水利专用大模型
-- 🦙 **LlamaFactory 本地部署** —— 微调产物合并后用 LlamaFactory 起本地推理服务（OpenAI 兼容 API），后端改两项配置即完成接入；也支持 vLLM
-- 🔧 **LLM 原生 Function Calling 工具编排** —— 无关键词路由，planner 自主规划多轮工具调用（去重 / 轮次控制 / 跨工具数据流注入），并发执行 + TTL 缓存
-- 🌊 **真实数据源接入** —— 水文爬虫（qqjjsj.com）、高德天气、Tavily 联网搜索、Qdrant 法规 RAG、SRTM DEM 地形分析、SCS-CN 降雨径流模型；生产环境真实源失败**硬失败**而非静默降级 mock
-- 📡 **两阶段真流式 SSE** —— 先推结构化预警卡（等级 / 依据 / 措施 / 引用），再逐 token 流式答案；15s 心跳保活 + 客户端断连协作式取消
-- 🧠 **五类记忆架构**（对齐认知科学分类 + Claude Code/Codex 双层模式）—— 会话记忆（上下文压缩）、长期记忆（MEMORY.md 用户手册 Agent 只读 + memory/ 目录自动记忆）、语义记忆（领域知识向量检索）、情景记忆（事件与解法）、程序记忆（可晋升 Skill 的通用方法：经验→提炼→晋升闭环），异步反思不阻塞响应，配套治理 API
-- 🎯 **Skill 系统（兼容 Claude Skills）** —— description embedding 语义匹配按需加载指令、工具子集隔离、支持 SKILL.md / .zip 导入（含 ZIP 炸弹 / 路径穿越防护）
-- 📚 **Citation Grounding 引用溯源** —— 引用必须逐字来自来源原文，校验失败带反馈重生成，杜绝编造
-- 🛡️ **工程化兜底** —— 结构化输出三级降级 + 4 级 JSON 修复、上下文压缩（Codex compact）、`<think>` 剥离、LLM 异常分类传播前端、限流 / CORS / 配置校验
+## 目录
 
-## 📑 目录
+- [项目主线](#项目主线)
+- [第一步：微调水利专用大模型](#第一步微调水利专用大模型)
+- [第二步：LlamaFactory 本地部署](#第二步llamafactory-本地部署)
+- [第三步：Agent 洪水预警](#第三步agent-洪水预警)
+  - [快速开始](#快速开始)
+  - [使用示例](#使用示例)
+  - [配置说明](#配置说明)
+  - [核心设计](#核心设计)
+  - [系统架构](#系统架构)
+- [Docker 部署](#docker-部署)
+- [项目结构](#项目结构)
+- [测试与质量](#测试与质量)
+- [系统级评估](#系统级评估)
+- [贡献](#贡献)
+- [许可证](#许可证)
 
-- [项目主线](#-项目主线)
-- [第一步：微调水利专用大模型](#%EF%B8%8F-第一步微调水利专用大模型)
-- [第二步：LlamaFactory 本地部署](#-第二步llamafactory-本地部署)
-- [第三步：Agent 洪水预警](#-第三步agent-洪水预警)
-  - [快速开始](#-快速开始)
-  - [使用示例](#-使用示例)
-  - [配置说明](#%EF%B8%8F-配置说明)
-  - [核心设计](#-核心设计)
-  - [系统架构](#%EF%B8%8F-系统架构)
-- [Docker 部署](#-docker-部署)
-- [项目结构](#-项目结构)
-- [测试与质量](#%EF%B8%8F-测试与质量)
-- [系统级评估](#-系统级评估)
-- [贡献](#-贡献)
-- [许可证](#-许可证)
-
-## 🏋️ 第一步：微调水利专用大模型
+## 第一步：微调水利专用大模型
 
 把云端强模型（qwen-plus）的 Agent 能力蒸馏进开源模型 Qwen3-4B，得到水利 / 防汛领域专用大模型（QLoRA，RTX 4060 单卡可跑）：
 
-```
-种子查询（45 条）
-   │ Self-Instruct 扩张（qwen-plus，2-gram Jaccard 去重）
-   ▼
-场景参数化（流量档位 → 等级真值 + mock 工具覆盖值）
-   │ 教师多轮合成（原生 tool_calls 双轨落盘 Hermes 格式，确定性回放）
-   ▼
-三道硬过滤（F1 参数合法 / F2 序列合法 / F3 等级一致）
-   │ LLM-as-Judge（qwen-max 四维打分：≥4 进 SFT，1~4 进 DPO 池）
-   ▼
-SFT 训练集（95% 业务 + 5% 知识问答）＋ DPO 偏好对
-   │ QLoRA SFT → merge → GRPO（trl + vLLM，纯规则奖励）
-   ▼
-水利专用大模型（评估：300 条 held-out，等级准确率 / 工具成功率）
-```
+1. **种子查询（45 条）** → Self-Instruct 扩张（qwen-plus，2-gram Jaccard 去重）
+2. **场景参数化** —— 流量档位 → 等级真值 + mock 工具覆盖值
+3. **教师多轮合成** —— 原生 tool_calls 落盘 Hermes 格式，确定性回放
+4. **三道硬过滤** —— F1 参数合法 / F2 序列合法 / F3 等级一致
+5. **LLM-as-Judge**（qwen-max 四维打分）—— ≥4 进 SFT，1~4 进 DPO 池
+6. **产出** —— SFT 训练集（95% 业务 + 5% 知识问答）+ DPO 偏好对，经 QLoRA SFT → merge → GRPO（纯规则奖励）得到水利专用大模型，300 条 held-out 评估（等级准确率 / 工具成功率）
 
 **奖励设计**：`reward = format_gate × (r1 等级 0.4 + r2 工具调用 0.3 + r3 预案质量 0.3)`
 
@@ -93,9 +72,9 @@ python -m train.grpo.train_grpo
 python -m train.eval.run_eval --models <base> sft-merged grpo-merged --n 300
 ```
 
-产物：合并后的全量权重，默认在 `models/wateragents-qwen3-4b-v1/`——这就是你的水利专用大模型，进入第二步部署。
+产物：合并后的全量权重，默认在 `models/wateragents-qwen3-4b-v1/`，供第二步部署使用。
 
-## 🦙 第二步：LlamaFactory 本地部署
+## 第二步：LlamaFactory 本地部署
 
 微调产物（`models/wateragents-qwen3-4b-v1/`）通过 [LlamaFactory](https://github.com/hiyouga/LLaMA-Factory) 起本地推理服务，提供 OpenAI 兼容 API。推理配置见 [`train/lora/configs/wateragents_inference.yaml`](train/lora/configs/wateragents_inference.yaml)（方式 A：合并后推理，无 quantization_bit，template=qwen3_nothink）。
 
@@ -147,11 +126,11 @@ LLM_MODEL=wateragents-qwen3-4b-v1          # 与推理配置中的模型名一�
 
 在前端输入「龙门站现在水情怎么样」，Agent 应正确调用 `get_hydrology` 工具并返回研判结果。若思考内容 `<think>...</think>` 泄漏到前端，确认后端已应用 `strip_think` 处理（见 [backend/app/core/llm.py](backend/app/core/llm.py)）。
 
-## 🌊 第三步：Agent 洪水预警
+## 第三步：Agent 洪水预警
 
 本地（或云端）模型就位后，启动 Agent 服务，即可对话式完成防汛预警研判。
 
-### 🚀 快速开始
+### 快速开始
 
 #### 环境要求
 
@@ -159,7 +138,7 @@ LLM_MODEL=wateragents-qwen3-4b-v1          # 与推理配置中的模型名一�
 - [Qdrant](https://github.com/qdrant/qdrant/releases)（法规向量检索）
 - MySQL 8.0（会话 / 记忆 / Skill 持久化；不配则对应功能自动禁用或跳过）
 
-#### 1️⃣ 配置后端
+#### 1. 配置后端
 
 ```bash
 cd backend
@@ -170,14 +149,14 @@ cp .env.example .env
 #   其余 API Key 留空自动降级 mock，不影响启动
 ```
 
-#### 2️⃣ 启动 Qdrant 并构建向量库
+#### 2. 启动 Qdrant 并构建向量库
 
 ```bash
 backend/start_qdrant.bat        # 或手动运行 qdrant.exe
 cd backend && python build_vector_store.py
 ```
 
-#### 3️⃣（可选）注册种子技能
+#### 3. （可选）注册种子技能
 
 预置 4 个防汛 Skill（实时水情查询 / 降雨洪水预判 / 预警级别解读 / 应急响应建议）：
 
@@ -185,7 +164,7 @@ cd backend && python build_vector_store.py
 python backend/scripts/seed_skills.py
 ```
 
-#### 4️⃣ 启动服务
+#### 4. 启动服务
 
 ```bash
 # 后端（端口 8000）
@@ -195,9 +174,9 @@ cd backend && python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 cd frontend && npm install && npm run dev
 ```
 
-打开 http://localhost:5173 ，问一句「吴堡站现在水情怎么样」即可体验完整链路。
+打开 http://localhost:5173 ，输入「吴堡站现在水情怎么样」验证全链路。
 
-### 💬 使用示例
+### 使用示例
 
 #### SSE 流式（前端同款协议）
 
@@ -255,7 +234,7 @@ curl -X POST http://localhost:8000/api/agent/query \
 | POST                 | `/api/skills/import`                    | 导入 .zip / .skill / .md 技能包 |
 | GET                  | `/api/health`、`/api/health/ready`    | 存活 / 就绪探针                 |
 
-### ⚙️ 配置说明
+### 配置说明
 
 完整清单见 [`backend/.env.example`](backend/.env.example)，常用项：
 
@@ -274,19 +253,19 @@ curl -X POST http://localhost:8000/api/agent/query \
 | `RATE_LIMIT_PER_MINUTE`                        | `30`             | slowapi 限流                                                        |
 | `APP_ENV`                                      | `development`    | `production` 下关键工具真实源失败**硬失败**、校验占位符 Key |
 
-### 🧠 核心设计
+### 核心设计
 
 #### 工作流（4 节点状态机）
 
 无独立路由层（借鉴 OpenAI / Cohere 主流方案）：planner 的 LLM 原生 Function
 Calling 统一决策，**不调工具即视为闲聊，调工具即视为防汛业务**。
 
-```
-START → planner ──(第 1 轮无工具调用)──→ direct_chat → END
-           │
-           └─(有工具调用)→ executor ─(should_continue?)─┬─ 是 → planner（循环，≤ LLM_MAX_TOOL_ROUNDS）
-                                                       └─ 否 → synthesizer → END
-```
+START → **planner**（Function Calling 规划 + 信息充分性判断）
+
+- 第 1 轮无工具调用 → **direct_chat**（闲聊 / 概念解释流式对话）→ END
+- 有工具调用 → **executor**（并发执行 + TTL 缓存）
+  - 信息不足 → 回到 planner 循环（≤ LLM_MAX_TOOL_ROUNDS）
+  - 信息充分 → **synthesizer**（两阶段真流式 + 引用校验）→ END
 
 1. **planner** — Function Calling 规划 + 信息充分性判断（空 tool_calls 即结束）；签名去重防死循环；第 1 轮注入 Skill 匹配指令、历史经验、历史摘要；概念解释类问题直接返回空工具列表
 2. **executor** — ThreadPoolExecutor(4) 并发 + 5min TTL 缓存；同轮含 get_weather + predict_runoff 时两阶段执行，自动注入累计降雨量与逐小时序列（跨工具数据流）
@@ -303,7 +282,7 @@ START → planner ──(第 1 轮无工具调用)──→ direct_chat → END
 | Ⅳ级 | 其他（水情平稳）                                       | 蓝色 |
 
 规则引擎 [`agent/graph/synthesizer.py`](agent/graph/synthesizer.py) 的 `compute_warning_level`
-是全项目**单一权威来源**：线上研判、训练数据等级真值、奖励函数共用，防规则漂移。
+是全项目单一权威来源：线上研判、训练数据等级真值、奖励函数共用同一实现，避免规则漂移。
 
 #### 五类记忆架构
 
@@ -351,70 +330,21 @@ START → planner ──(第 1 轮无工具调用)──→ direct_chat → END
 | 结构化日志   | structlog（JSON / Console 双模式）；LangFuse 可选追踪                                  |
 | 安全         | slowapi 限流 + production CORS 收紧 + 占位符 Key 校验 + Skill 导入防护                 |
 
-### 🏗️ 系统架构
+### 系统架构
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    前端（Vue 3 + Vite，无 UI 库）            │
-│  AgentView（对话）/ SkillsView（技能管理）/ HealthView       │
-│  useAgentChat.ts（SSE 事件状态机）── api/agent.ts（fetch 流式）│
-│  自写 Toast / 会话侧栏（MySQL 持久化，启动全量加载）           │
-└──────────────────────────────┬──────────────────────────────┘
-                               │ HTTP / SSE
-┌──────────────────────────────▼──────────────────────────────┐
-│                后端（FastAPI + LangGraph）                   │
-│  ┌────────────────────┐  ┌───────────────────────────────┐ │
-│  │API 层（5 组路由）   │  │   Agent 工作流（agent/graph/） │ │
-│  │agent / sessions    │─▶│  planner → executor（可循环）  │ │
-│  │memories / skills   │  │    │        ↓                 │ │
-│  │health              │  │  闲聊→direct_chat  合成→synth  │ │
-│  └────────────────────┘  └───────────────────────────────┘ │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │  工具层（agent/tools/）— 8 个工具（真实/mock 双轨）    │   │
-│  │  get_weather | get_hydrology | predict_runoff        │   │
-│  │  search_regulation | query_gis_terrain               │   │
-│  │  generate_plan | web_search | list_skills（元工具）   │   │
-│  └──────────────────────────────────────────────────────┘   │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │  Skill 系统（agent/skills/，借鉴 Claude Skills）       │   │
-│  │  description embedding 匹配 → 按需加载 instructions   │   │
-│  │  → 工具子集隔离；支持 SKILL.md / .zip 导入            │   │
-│  └──────────────────────────────────────────────────────┘   │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │  五类记忆（agent/memory/，对齐认知科学分类）           │   │
-│  │  · 会话记忆：上下文压缩（超预算 LLM 摘要）             │   │
-│  │  · 长期记忆：MEMORY.md 手册（Agent 只读）+ memory/ 目录 │   │
-│  │  · 语义记忆（领域知识）─┐                             │   │
-│  │  · 情景记忆（事件+解法）├─ MySQL + Qdrant 向量检索     │   │
-│  │  · 程序记忆（通用方法）─┘ 可晋升 Skill（人工确认）      │   │
-│  │  Curator：剪枝→压缩→提炼→晋升→对账（周期治理）         │   │
-│  └──────────────────────────────────────────────────────┘   │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │  上下文压缩（context_compact.py，借鉴 Codex compact）  │   │
-│  │  history 超 4000 token → 保留近 2 轮原文 + 早轮 LLM 摘要│   │
-│  └──────────────────────────────────────────────────────┘   │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │  结构化输出降级 + Citation Grounding（synthesizer_node）│   │
-│  │  json_schema strict → json_object → 无 response_format │   │
-│  │  + 4 级 JSON 修复；引用须为来源原文子串否则带反馈重生成 │   │
-│  └──────────────────────────────────────────────────────┘   │
-└──────────────────────────────┬──────────────────────────────┘
-                               │
-        ┌──────────────────────┼──────────────────────┐
-        ▼                      ▼                      ▼
-   本地 LlamaFactory      Qdrant 向量库         外部数据源
-   /vLLM（微调水利       (法规 RAG 检索       (高德/Tavily/
-    大模型，或云端        + Skill 匹配)        qqjjsj.com)
-    qwen-plus)
-                               │
-                               ▼
-                   训练管线（train/）
-                   Self-Instruct 种子扩张 → 场景参数化
-                   → 双模型蒸馏 → 三道过滤 → LLM-as-Judge
-                   → SFT + DPO 偏好对 → QLoRA/GRPO
-```
+- **前端**（Vue 3 + Vite，无 UI 库）：AgentView 对话 / SkillsView 技能管理 / HealthView；useAgentChat（SSE 事件状态机）；自写会话侧栏（MySQL 持久化，启动全量加载）
+- **后端**（FastAPI + LangGraph），经 HTTP / SSE 与前端通信：
+  - API 层：agent / sessions / memories / skills / health 五组路由
+  - Agent 工作流（`agent/graph/`）：planner → executor（可循环）→ synthesizer，闲聊 → direct_chat
+  - 工具层（`agent/tools/`）：8 个工具，真实 / mock 双轨——get_weather、get_hydrology、predict_runoff、search_regulation、query_gis_terrain、generate_plan、web_search、list_skills（元工具）
+  - Skill 系统（`agent/skills/`，借鉴 Claude Skills）：description embedding 匹配 → 按需加载指令 → 工具子集隔离；支持 SKILL.md / .zip 导入
+  - 五类记忆（`agent/memory/`）：会话（上下文压缩）、长期（MEMORY.md 手册 + memory/ 目录）、语义 / 情景 / 程序（MySQL + Qdrant 向量检索，程序可晋升 Skill）；Curator 周期治理（剪枝 → 压缩 → 提炼 → 晋升 → 对账）
+  - 上下文压缩（`context_compact.py`，借鉴 Codex compact）：history 超 4000 token → 保留近 2 轮原文 + 早轮 LLM 摘要
+  - 结构化输出降级 + Citation Grounding（`synthesizer_node`）：json_schema strict → json_object → 无 response_format + 4 级 JSON 修复；引用须为来源原文子串，否则带反馈重生成
+- **下游服务**：本地 LlamaFactory / vLLM（微调水利大模型，或云端 qwen-plus）｜ Qdrant 向量库（法规 RAG 检索 + Skill 匹配）｜ 外部数据源（高德 / Tavily / qqjjsj.com）
+- **训练管线**（`train/`）：Self-Instruct 种子扩张 → 场景参数化 → 双模型蒸馏 → 三道过滤 → LLM-as-Judge → SFT + DPO 偏好对 → QLoRA / GRPO，微调产物供本地部署使用
 
-## 🐳 Docker 部署
+## Docker 部署
 
 ```bash
 cd docker && cp .env.example .env   # 填入密钥
@@ -428,7 +358,7 @@ docker compose --profile init run --rm vector-init   # 首次：构建法规向�
 - 本地微调模型跑 vLLM：`docker compose --profile local-llm up -d`
 - 训练容器：`docker compose --profile train run --rm train bash`
 
-## 📁 项目结构
+## 项目结构
 
 ```
 WaterAgents/
@@ -458,7 +388,7 @@ WaterAgents/
 └── .github/workflows/ci.yml        # CI（ruff + pytest + 前端 tsc/lint/test）
 ```
 
-## ✅️ 测试与质量
+## 测试与质量
 
 ```bash
 # 后端 + 训练管线（MySQL 未配置时相关用例自动跳过）
@@ -475,7 +405,7 @@ cd frontend && npm run test && npm run lint
 - 训练管线 15 个测试文件：场景确定性、种子隔离、Hermes 往返、三道过滤、奖励函数等
 - CI（GitHub Actions）：ruff + pytest（含真实 MySQL service）+ 前端 vue-tsc / ESLint / Vitest / Build
 
-## 📊 系统级评估
+## 系统级评估
 
 与 `train/eval`（裸模型合成循环，评微调效果）互补，`evals/` 评估**模型 + Harness 组合体**：驱动真实 Agent 链路（planner → executor → synthesizer，含记忆注入），方法论对齐《AI Agents in Depth》第 6 章「Agent 的评估」（τ-bench / RAGAS / Scale AI / AndroidWorld 等实践）。
 
@@ -512,7 +442,7 @@ python evals/run_eval.py --update-baseline
 - **回归门禁**：与 `evals/baselines/baseline.json` 配对对比，阈值 = max(固定下限, 2×SE)——分差落在噪声带宽内不下结论；门禁触发退出码 1
 - **CI**：GitHub Actions 手动触发（`eval.yml`），报告上传 artifact
 
-## 🤝 贡献
+## 贡献
 
 欢迎 Issue 与 PR：
 
@@ -525,6 +455,6 @@ python -m pytest backend/tests train/tests && python -m ruff check .
 
 提交信息遵循 [Conventional Commits](https://www.conventionalcommits.org/zh-hans/)（`feat:` / `fix:` / `docs:` / `refactor:` / `test:` ...）。
 
-## 📄 许可证
+## 许可证
 
 本项目基于 [MIT License](LICENSE) 开源。
