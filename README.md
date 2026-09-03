@@ -243,6 +243,7 @@ curl -X POST http://localhost:8000/api/agent/query \
 | `LLM_API_KEY`                                  | —                 | **必填**。云端 key 或本地部署时任意非空值                          |
 | `LLM_BASE_URL`                                 | DashScope          | 任意 OpenAI 兼容端点：LlamaFactory（`http://localhost:8001/v1`）/ vLLM / 云端 |
 | `LLM_MODEL`                                    | `qwen-plus`      | 主模型；`LLM_JUDGE_MODEL` 为训练管线评判模型                      |
+| `EMBEDDING_API_KEY` / `EMBEDDING_BASE_URL`     | 空（回退 `LLM_*`） | Embedding 独立凭证；推理与 embedding 分属不同服务商时必填（如推理 DeepSeek + embedding DashScope） |
 | `LLM_MAX_TOOL_ROUNDS`                          | `5`              | 单次会话最大工具轮次（防死循环）                                    |
 | `AMAP_API_KEY` / `TAVILY_API_KEY`            | 空                 | 高德天气 / 联网搜索；留空降级 mock                                  |
 | `QDRANT_HOST` / `QDRANT_PORT`                | `127.0.0.1:6333` | 法规 RAG 向量库                                                     |
@@ -313,6 +314,14 @@ START → **planner**（Function Calling 规划 + 信息充分性判断）
 - **会话**：MySQL 持久化，草稿态延迟创建（首次发送才建会话），流式完成后 PUT 全量同步
 - **压缩**：history 超 4000 token 保留近 2 轮原文、早轮 LLM 摘要为一条 system 消息（指纹缓存，失败降级截断）
 
+#### 上下文缓存（KV Cache 友好设计）
+
+面向 DeepSeek 自动前缀缓存（命中约 1/10 计费）与本地 vLLM APC（`--enable-prefix-caching`）设计，按 [ai-agent-book 第 2 章](https://bojieli.github.io/ai-agent-book/book/chapter2)三原则改造（调研与三后端对照详见 [docs/kv-cache-research.md](docs/kv-cache-research.md)；注：当前 MaaS 专属实例实测未开启跨请求缓存，切 DeepSeek / 百炼公共部署 / 本地 vLLM 后收益生效）：
+
+- **静态前缀冻结**：planner/synthesizer 的 system 分层（静态指令 → 长期记忆 → Skill 清单按 name 排序），tools schema 逐字稳定；测试锁定跨轮逐字一致
+- **动态只追加**：synthesizer Phase 2 system = Phase 1 system + 追加第二阶段指令（两阶段重发的大段工具结果命中同一前缀缓存）；planner 第 1 轮注入的经验/历史摘要写入 state 跨轮原样保留
+- **命中率观测**：流式开 `include_usage`，`llm_stats` 按节点聚合 `cached_tokens`（兼容 DeepSeek `prompt_cache_hit_tokens` / vLLM 字段命名），日志输出 `[llm-cache] node=... hit_rate=...%`
+
 #### 关键设计速查
 
 | 设计点       | 方案                                                                                   |
@@ -326,6 +335,7 @@ START → **planner**（Function Calling 规划 + 信息充分性判断）
 | 结构化输出   | json_schema strict → json_object → 无 response_format 三级降级 + 4 级 JSON 修复      |
 | 引用溯源     | quote 须为来源原文子串，失败带反馈重生成（≤2 次），用尽则过滤                         |
 | 思考内容剥离 | `strip_think` 移除 `<think>` 块，流式 / 非流式全路径覆盖                           |
+| 前缀缓存     | KV Cache 友好上下文工程（静态前缀冻结 + 只追加 + 命中率观测），DeepSeek/MaaS/vLLM 三后端通用 |
 | 前端 UI      | 无 UI 库，自写组件（Toast / 会话侧栏 / 预警卡 / 引用卡），Codex 风格                   |
 | 结构化日志   | structlog（JSON / Console 双模式）；LangFuse 可选追踪                                  |
 | 安全         | slowapi 限流 + production CORS 收紧 + 占位符 Key 校验 + Skill 导入防护                 |

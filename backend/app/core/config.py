@@ -46,6 +46,11 @@ class Settings(BaseSettings):
     LLM_MAX_TOOL_ROUNDS: int = 5
     # Embedding 模型（用于法规 RAG 检索 + Skill 匹配）
     LLM_EMBEDDING_MODEL: str = "text-embedding-v3"
+    # Embedding 独立凭证（与推理 LLM_API_KEY 分开授权/计费），留空回退到 LLM_* 配置。
+    # 典型场景：推理切 DeepSeek（无 embedding API），embedding 留在 DashScope——
+    # 此时必须配置 EMBEDDING_API_KEY + EMBEDDING_BASE_URL 指向 embedding 服务商
+    EMBEDDING_API_KEY: str = ""
+    EMBEDDING_BASE_URL: str = ""
 
     # Qdrant 向量库配置（用于法规 RAG 检索）
     QDRANT_HOST: str = "127.0.0.1"
@@ -148,8 +153,10 @@ class Settings(BaseSettings):
 
         return {
             "LLM_API_KEY": _mask(self.LLM_API_KEY),
+            "EMBEDDING_API_KEY": _mask(self.EMBEDDING_API_KEY or self.LLM_API_KEY),
             "AMAP_API_KEY": _mask(self.AMAP_API_KEY),
             "LLM_BASE_URL": self.LLM_BASE_URL,
+            "EMBEDDING_BASE_URL": self.EMBEDDING_BASE_URL or self.LLM_BASE_URL,
             "LLM_MODEL": self.LLM_MODEL,
             "QDRANT": f"{self.QDRANT_HOST}:{self.QDRANT_PORT}",
             "MYSQL": f"{self.MYSQL_HOST}:{self.MYSQL_PORT}/{self.MYSQL_DATABASE}" if self.MYSQL_PASSWORD else "<empty>",

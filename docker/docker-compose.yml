@@ -32,11 +32,14 @@ services:
     profiles: ["local-llm"]   # 用本地微调模型时启用：docker compose --profile local-llm up
     # 注意：--enable-auto-tool-choice --tool-call-parser hermes 必需，
     # 否则服务端不解析 <tool_call>，planner 的 Function Calling 链路失效
+    # --enable-prefix-caching：KV Cache 前缀复用（planner 多轮/synthesizer 两阶段
+    # 重发的相同前缀直接命中，v0.7.3 需显式开启；v0.8+ V1 引擎默认开启）
     command: >
       --model /models/grpo-merged
       --served-model-name water-agent-fc
       --max-model-len 8192
       --gpu-memory-utilization 0.85
+      --enable-prefix-caching
       --enable-auto-tool-choice
       --tool-call-parser hermes
     volumes:
@@ -63,6 +66,9 @@ services:
       LLM_API_KEY: ${LLM_API_KEY}
       LLM_BASE_URL: ${LLM_BASE_URL}
       LLM_MODEL: ${LLM_MODEL}
+      # Embedding 独立凭证（留空回退 LLM_*；推理与 embedding 分属不同服务商时必填）
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
       QDRANT_HOST: qdrant
       QDRANT_PORT: "6333"
       AMAP_API_KEY: ${AMAP_API_KEY:-}

@@ -17,6 +17,7 @@ from agent.graph.errors import _classify_llm_error
 from agent.prompts import DIRECT_CHAT_PROMPT
 from agent.utils import CitationMarkerFilter
 from app.core.llm import LLM_TIMEOUTS, get_llm_client, get_llm_config
+from app.core.llm_stats import record_llm_usage
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +88,8 @@ def _direct_chat_stream(
             temperature=0.7,
             max_tokens=4096,
             stream=True,
+            # 末 chunk 返回 usage，用于前缀缓存命中率观测（后端不支持时字段为空，无副作用）
+            stream_options={"include_usage": True},
         )
     except (APITimeoutError, RateLimitError, APIConnectionError, APIError) as e:
         logger.exception("[direct_chat_stream] LLM 流式调用失败 (%s)", type(e).__name__)
@@ -104,6 +107,10 @@ def _direct_chat_stream(
     buffer = ""
     in_think = False
     for chunk in stream:
+        # include_usage 时末 chunk 的 choices 为空、usage 携带统计信息
+        usage = getattr(chunk, "usage", None)
+        if usage:
+            record_llm_usage("chat_stream", usage)
         if not chunk.choices:
             continue
         delta = chunk.choices[0].delta

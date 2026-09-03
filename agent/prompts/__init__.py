@@ -13,7 +13,7 @@
 from agent.prompts.direct_chat import DIRECT_CHAT_PROMPT
 from agent.prompts.synthesizer import (
     CITATION_GUIDANCE,
-    SYNTH_ANSWER_PROMPT,
+    SYNTH_ANSWER_ADDENDUM,
     SYNTH_META_SCHEMA,
     SYNTH_RESPONSE_SCHEMA,
     SYNTHESIZER_PROMPT,
@@ -22,7 +22,7 @@ from agent.prompts.synthesizer import (
 __all__ = [
     "DIRECT_CHAT_PROMPT",
     "SYNTHESIZER_PROMPT",
-    "SYNTH_ANSWER_PROMPT",
+    "SYNTH_ANSWER_ADDENDUM",
     "CITATION_GUIDANCE",
     "SYNTH_RESPONSE_SCHEMA",
     "SYNTH_META_SCHEMA",

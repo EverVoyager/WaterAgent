@@ -66,6 +66,23 @@ def get_llm_client() -> OpenAI:
     )
 
 
+@lru_cache
+def get_embedding_client() -> OpenAI:
+    """单例 Embedding 客户端（独立凭证，与推理客户端隔离）。
+
+    EMBEDDING_API_KEY / EMBEDDING_BASE_URL 留空时回退到 LLM_* 配置（向后兼容）。
+    分离动机：① embedding 与推理分开授权/计费；② 推理切 DeepSeek（无
+    embedding API）时，embedding 仍可指向 DashScope 等其他服务商。
+    """
+    settings = get_settings()
+    return OpenAI(
+        api_key=settings.EMBEDDING_API_KEY or settings.LLM_API_KEY,
+        base_url=settings.EMBEDDING_BASE_URL or settings.LLM_BASE_URL,
+        timeout=LLM_TIMEOUTS["embedding"],
+        max_retries=0,
+    )
+
+
 def get_llm_config() -> dict:
     """返回 LLM 调用所需的配置。"""
     settings = get_settings()

@@ -37,3 +37,7 @@ class AgentState(TypedDict, total=False):
     skill_name: str                          # 匹配到的 Skill 名（未匹配为空）
     skill_instructions: str                  # 匹配到的 Skill 行为指令
     skill_tool_names: list[str]              # Skill 限制的工具子集（空 = 不限制）
+    # 第 1 轮注入的上下文段落，跨轮原样保留（KV Cache 前缀"只增不改"：
+    # 后续轮次 user 消息保留这些段落，前缀缓存才能延伸）
+    experiences: str                         # 历史经验（成功工具模式 + 失败教训）
+    history_context: str                     # 历史对话摘要（压缩后的早轮 + 近轮原文）

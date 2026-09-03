@@ -3,6 +3,7 @@
 包含：
 - SYNTHESIZER_PROMPT：研判系统提示词（含预警阈值描述、few-shot 示例）
 - CITATION_GUIDANCE：引用规范指引（追加到 system prompt）
+- SYNTH_ANSWER_ADDENDUM：两阶段流式 Phase 2 追加指令块（拼在 Phase 1 system 之后）
 - SYNTH_RESPONSE_SCHEMA：非流式研判完整响应 schema（含 answer）
 - SYNTH_META_SCHEMA：两阶段流式 Phase 1 metadata schema（不含 answer）
 """
@@ -92,10 +93,19 @@ few-shot 示例（输入 → 输出）：
 仅返回 JSON 对象，不要其他内容。"""
 
 
-# 两阶段流式 Phase 2 专用提示词：只生成面向用户的纯文本回答，不输出 JSON。
+# 两阶段流式 Phase 2 追加指令块：只生成面向用户的纯文本回答，不输出 JSON。
 # Phase 1 已通过 SYNTH_META_SCHEMA 产出 warning_level/reasoning/actions/citations，
 # 这里不再要求模型重复输出任何结构化字段，避免 JSON 外壳被当作 answer 流式展示。
-SYNTH_ANSWER_PROMPT = """你是黄河吕梁段防汛预警智能体的综合研判模块，负责基于已确认的研判结论生成面向用户的最终回答。
+#
+# KV Cache 前缀对齐（参考 ai-agent-book 第 2 章"前面不能动、后面可以压缩"）：
+# Phase 2 的 system prompt = Phase 1 完整 system prompt + 本追加块。
+# 两阶段几乎重发相同的大段工具结果，前缀对齐后 Phase 2 可命中 Phase 1 已算的
+# 前缀缓存（DeepSeek/MaaS 自动前缀缓存、本地 vLLM APC 均适用）。
+# 因此本块以"阶段切换"开场，显式覆盖前文"仅返回 JSON"的阶段一要求。
+SYNTH_ANSWER_ADDENDUM = """
+
+【当前阶段：第二阶段——生成面向用户的最终回答】
+前文"仅返回 JSON 对象"等结构化输出要求仅适用于第一阶段研判，本阶段不再适用。
 
 系统已确认以下结论（必须保持一致，但不要重复输出这些字段）：
 - 预警等级（warning_level）

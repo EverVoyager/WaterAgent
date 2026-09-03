@@ -66,13 +66,21 @@ class TestBuildSynthSystemContent:
         assert "TEST_SKILL_INSTRUCTIONS" in content
         assert "Skill 行为指令" in content
 
-    def test_answer_only_uses_plain_text_prompt(self):
-        """Phase 2（answer_only=True）应使用纯文本回答提示词，不再要求输出 JSON。"""
-        content = _build_synth_system_content(answer_only=True)
-        assert "不要输出 JSON" in content
-        assert "仅返回 JSON 对象，不要其他内容" not in content
-        # 不应追加 citations 数组规范（其中的"返回空数组 []"会诱导模型输出 JSON）
-        assert "citations 返回空数组" not in content
+    def test_answer_only_prefix_alignment(self):
+        """Phase 2（answer_only=True）system = Phase 1 system + 追加指令块。
+
+        KV Cache 前缀对齐：Phase 1 内容必须是 Phase 2 的严格前缀，
+        追加块显式声明阶段切换（覆盖前文"仅返回 JSON"的阶段一要求）。
+        """
+        phase1 = _build_synth_system_content()
+        phase2 = _build_synth_system_content(answer_only=True)
+        # Phase 1 system 是 Phase 2 的严格前缀（非空、真追加）
+        assert phase2.startswith(phase1)
+        assert len(phase2) > len(phase1)
+        # 追加块包含纯文本回答要求与阶段切换声明
+        assert "不要输出 JSON" in phase2
+        assert "第二阶段" in phase2
+        assert "仅适用于第一阶段" in phase2
 
 
 # ====== _build_synth_messages 测试 ======
@@ -239,7 +247,7 @@ class TestStreamAnswerViaLlm:
             assert "TEST_ACTION" in user_msg
 
     def test_phase2_system_prompt_is_plain_text(self):
-        """Phase 2 的 system prompt 应为纯文本回答提示词（answer_only=True）。"""
+        """Phase 2 的 system prompt 应为 Phase 1 前缀 + 第二阶段纯文本指令。"""
         tokens = ["answer"]
         mock_stream = _make_mock_stream_chunks(tokens)
         with patch("agent.graph.synthesizer_node.get_llm_config", return_value={"model": "test"}), \
@@ -251,8 +259,9 @@ class TestStreamAnswerViaLlm:
             ))
             call_kwargs = mock_create.call_args.kwargs
             system_msg = call_kwargs["messages"][0]["content"]
+            # 追加块要求纯文本回答，并显式声明阶段切换
             assert "不要输出 JSON" in system_msg
-            assert "仅返回 JSON 对象，不要其他内容" not in system_msg
+            assert "第二阶段" in system_msg
 
 
 # ====== _synth_via_llm_stream 集成测试 ======

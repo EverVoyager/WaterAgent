@@ -25,7 +25,7 @@ from agent.prompts import (
     CITATION_GUIDANCE as _CITATION_GUIDANCE,
 )
 from agent.prompts import (
-    SYNTH_ANSWER_PROMPT as _SYNTH_ANSWER_PROMPT,
+    SYNTH_ANSWER_ADDENDUM as _SYNTH_ANSWER_ADDENDUM,
 )
 from agent.prompts import (
     SYNTHESIZER_PROMPT,
@@ -39,6 +39,7 @@ from agent.utils import (
     strip_citation_markers,
 )
 from app.core.llm import LLM_TIMEOUTS, get_llm_client, get_llm_config, strip_think
+from app.core.llm_stats import record_llm_usage
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +98,7 @@ def _call_synth_with_fallback(client, model: str, messages: list, schema=None):
             if fmt is not None:
                 kwargs["response_format"] = fmt
             resp = client.chat.completions.create(**kwargs)
+            record_llm_usage("synthesizer", resp.usage)
             logger.info("[synthesizer] LLM 调用成功（response_format=%s）", label)
             return resp
         except (APITimeoutError, RateLimitError, APIConnectionError) as e:
@@ -145,12 +147,15 @@ def _build_synth_system_content(
 
     非流式 _synth_via_llm 和流式 phase 1/phase 2 共享此构建逻辑。
 
+    KV Cache 前缀对齐（ai-agent-book 第 2 章原则：动态内容只追加不改前文）：
+    Phase 2（answer_only=True）的 system = Phase 1 完整 system + 追加
+    SYNTH_ANSWER_ADDENDUM，保证两阶段重发的大段工具结果命中同一前缀缓存。
+
     Args:
-        answer_only: True 时使用 SYNTH_ANSWER_PROMPT（Phase 2 纯文本回答），
-            不追加 CITATION_GUIDANCE（其中的 citations 数组规范会诱导模型输出 JSON）。
+        answer_only: True 时在 Phase 1 system 末尾追加第二阶段纯文本回答指令
         query: 当前用户查询，用于记忆语义检索（只注入相关偏好/知识）
     """
-    system_content = _SYNTH_ANSWER_PROMPT if answer_only else SYNTHESIZER_PROMPT
+    system_content = SYNTHESIZER_PROMPT
 
     # 注入已启用 Skill 元信息（name + description）作为上下文
     try:
@@ -199,8 +204,11 @@ def _build_synth_system_content(
             + "\n=== Skill 指令结束 ===\n"
             + "请在上述 Skill 指导下生成最终回答。若 Skill 指定了输出格式或约束，优先遵循。\n"
         )
-    if not answer_only:
-        system_content = system_content + _CITATION_GUIDANCE
+    # 引用规范两阶段都注入：Phase 2 的回答同样要标注 [N]，且作为 Phase 1 前缀的
+    # 一部分保持逐字一致（addendum 中已声明 citations 字段不再输出）
+    system_content = system_content + _CITATION_GUIDANCE
+    if answer_only:
+        system_content = system_content + _SYNTH_ANSWER_ADDENDUM
     return system_content
 
 
@@ -216,7 +224,8 @@ def _build_synth_messages(
 
     Args:
         extra_context: 额外上下文（如 phase 2 的 metadata 结论），追加到 user 消息末尾
-        answer_only: True 时 system prompt 使用 SYNTH_ANSWER_PROMPT（Phase 2 纯文本回答）
+        answer_only: True 时 system prompt 在 Phase 1 基础上追加 SYNTH_ANSWER_ADDENDUM
+            （Phase 2 纯文本回答）
 
     Returns:
         (messages, source_registry)
@@ -620,7 +629,8 @@ def _stream_answer_via_llm(
     """两阶段流式 Phase 2：LLM stream=True 逐 token 生成 answer。
 
     使用 Phase 1 的 metadata 作为上下文，确保 answer 与预警等级/措施一致。
-    system prompt 使用 SYNTH_ANSWER_PROMPT（answer_only=True），要求模型只输出
+    system prompt 为 Phase 1 system + SYNTH_ANSWER_ADDENDUM（answer_only=True），
+    前缀对齐以命中 Phase 1 已算的 KV Cache；追加块要求模型只输出
     纯文本自然语言回答，避免再次输出 JSON 外壳被当作 answer 流式展示。
     <think> 块剥离状态机与 direct_chat_stream 一致（推理过程不流式推给前端）。
 
@@ -659,6 +669,8 @@ def _stream_answer_via_llm(
             temperature=0.3,
             max_tokens=4096,
             stream=True,
+            # 末 chunk 返回 usage，用于前缀缓存命中率观测（后端不支持时字段为空，无副作用）
+            stream_options={"include_usage": True},
         )
     except (APITimeoutError, RateLimitError, APIConnectionError, APIError) as e:
         logger.exception("[synthesizer] Phase 2 LLM 流式调用失败 (%s)", type(e).__name__)
@@ -674,6 +686,10 @@ def _stream_answer_via_llm(
     buffer = ""
     in_think = False
     for chunk in stream:
+        # include_usage 时末 chunk 的 choices 为空、usage 携带统计信息
+        usage = getattr(chunk, "usage", None)
+        if usage:
+            record_llm_usage("synthesizer_phase2", usage)
         if not chunk.choices:
             continue
         delta = chunk.choices[0].delta

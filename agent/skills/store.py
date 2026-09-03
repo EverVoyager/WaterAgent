@@ -51,12 +51,17 @@ def get_enabled_skills_brief() -> str:
 
     Returns:
         格式化的 Skill 列表文本；无启用 Skill 时返回空字符串。
+
+    Note:
+        按 name 排序输出。该文本注入 system prompt，顺序必须确定，
+        否则数据库返回顺序变化会破坏 LLM 请求的前缀缓存
+        （KV Cache 要求静态前缀逐字一致）。
     """
     skills = list_skills(enabled_only=True)
     if not skills:
         return ""
     lines = []
-    for s in skills:
+    for s in sorted(skills, key=lambda s: s.name):
         tools_hint = f"（工具: {', '.join(s.tool_names)}）" if s.tool_names else ""
         lines.append(f"- {s.name}: {s.description}{tools_hint}")
     return "\n".join(lines)

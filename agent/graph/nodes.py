@@ -23,6 +23,7 @@ from agent.graph.synthesizer_node import _summarize_results
 from agent.prompts import DIRECT_CHAT_PROMPT
 from agent.utils import strip_citation_markers
 from app.core.llm import LLM_TIMEOUTS, extract_content, get_llm_client, get_llm_config
+from app.core.llm_stats import record_llm_usage
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +103,7 @@ def direct_chat_node(state: AgentState) -> dict[str, Any]:
             temperature=0.7,
             max_tokens=4096,
         )
+        record_llm_usage("chat", resp.usage)
     except (APITimeoutError, RateLimitError, APIConnectionError, APIError) as e:
         logger.exception("[direct_chat] LLM 调用失败 (%s)", type(e).__name__)
         raise _classify_llm_error(e) from e
@@ -157,9 +159,11 @@ def planner_node(state: AgentState) -> dict[str, Any]:
         except Exception as e:
             logger.debug("[planner] Skill 匹配失败（不影响主流程）：%s", e)
 
-    # 自进化：第 1 轮规划时注入历史经验（成功工具模式 + 失败教训）
-    experiences = ""
-    if rounds == 1:
+    # 自进化：第 1 轮规划时注入历史经验（成功工具模式 + 失败教训）。
+    # 结果写入 state 跨轮原样保留（KV Cache 前缀"只增不改"）：后续轮次的
+    # user 消息保留第 1 轮注入的段落，前缀缓存才能跨轮延伸
+    experiences = state.get("experiences", "")
+    if rounds == 1 and not experiences:
         try:
             from agent.memory import get_relevant_experiences
             experiences = get_relevant_experiences(query)
@@ -169,9 +173,9 @@ def planner_node(state: AgentState) -> dict[str, Any]:
             logger.debug("[planner] 注入经验失败（不影响主流程）：%s", e)
 
     # 上下文压缩：第 1 轮注入历史对话摘要（含压缩后的早轮摘要 + 最近几轮原文）
-    # 后续轮次 context_summary 已含工具结果，不再注入避免重复
-    history_context = ""
-    if rounds == 1:
+    # 后续轮次 context_summary 已含工具结果，不再重新计算，从 state 复用
+    history_context = state.get("history_context", "")
+    if rounds == 1 and not history_context:
         history = state.get("history", [])
         if history:
             try:
@@ -231,6 +235,8 @@ def planner_node(state: AgentState) -> dict[str, Any]:
         "skill_name": skill_name,
         "skill_instructions": skill_instructions,
         "skill_tool_names": skill_tool_names,
+        "experiences": experiences,
+        "history_context": history_context,
     }
 
 
@@ -410,6 +416,7 @@ def _plan_via_function_calling(
             temperature=0.1,
             max_tokens=1024,
         )
+        record_llm_usage("planner", resp.usage)
     except (APITimeoutError, RateLimitError, APIConnectionError, APIError) as e:
         logger.exception("[planner] LLM Function Calling 调用失败 (%s)", type(e).__name__)
         raise _classify_llm_error(e) from e
