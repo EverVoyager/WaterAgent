@@ -316,7 +316,7 @@ START → **planner**（Function Calling 规划 + 信息充分性判断）
 
 #### 上下文缓存（KV Cache 友好设计）
 
-面向 DeepSeek 自动前缀缓存（命中约 1/10 计费）与本地 vLLM APC（`--enable-prefix-caching`）设计，按 [ai-agent-book 第 2 章](https://bojieli.github.io/ai-agent-book/book/chapter2)三原则改造（调研与三后端对照详见 [docs/kv-cache-research.md](docs/kv-cache-research.md)；注：当前 MaaS 专属实例实测未开启跨请求缓存，切 DeepSeek / 百炼公共部署 / 本地 vLLM 后收益生效）：
+面向 DeepSeek 自动前缀缓存（命中约 1/10 计费）与本地 vLLM APC（`--enable-prefix-caching`）设计，按 [ai-agent-book 第 2 章](https://bojieli.github.io/ai-agent-book/book/chapter2)三原则改造（注：当前 MaaS 专属实例实测未开启跨请求缓存，切 DeepSeek / 百炼公共部署 / 本地 vLLM 后收益生效）：
 
 - **静态前缀冻结**：planner/synthesizer 的 system 分层（静态指令 → 长期记忆 → Skill 清单按 name 排序），tools schema 逐字稳定；测试锁定跨轮逐字一致
 - **动态只追加**：synthesizer Phase 2 system = Phase 1 system + 追加第二阶段指令（两阶段重发的大段工具结果命中同一前缀缓存）；planner 第 1 轮注入的经验/历史摘要写入 state 跨轮原样保留
