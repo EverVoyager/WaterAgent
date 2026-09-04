@@ -10,6 +10,7 @@
    planner 第 1 轮注入的经验/历史摘要写入 state、后续轮次原样保留
 """
 import json
+import re
 from unittest.mock import MagicMock, patch
 
 from agent.graph.nodes import _plan_via_function_calling, planner_node
@@ -49,7 +50,8 @@ def _capture_planner_messages(round_num: int, **kwargs) -> list[dict]:
         "history_context": "",
     }
     args.update(kwargs)
-    with patch("agent.graph.nodes.get_llm_config", return_value={"model": "test"}), \
+    with patch("agent.graph.nodes.get_llm_config",
+               return_value={"model": "test", "max_tool_rounds": 5}), \
          patch("agent.graph.nodes.get_llm_client") as mock_client:
         mock_client.return_value.with_options.return_value.chat.completions.create.side_effect = fake_create
         _plan_via_function_calling(**args)
@@ -109,6 +111,36 @@ class TestToolsSchemaStable:
         s1 = json.dumps(build_openai_tools(), ensure_ascii=False)
         s2 = json.dumps(build_openai_tools(), ensure_ascii=False)
         assert s1 == s2
+
+
+# ====== 状态栏（ai-agent-book 第 2 章：动态元信息注入上下文末尾）======
+
+class TestStatusBar:
+    def test_status_bar_at_user_message_end(self):
+        """状态栏注入 planner user 消息末尾：时间 + 轮次进度 + 防注入声明。"""
+        m = _capture_planner_messages(round_num=2)
+        user = m[1]["content"]
+        assert "<<<STATUS" in user and "STATUS>>>" in user
+        # 位于所有动态段落（query/已收集信息/已调用工具）之后、末尾指令之前
+        assert user.rindex("<<<STATUS") > user.rindex("已调用过的工具")
+        assert user.rindex("STATUS>>>") < user.rindex("请据此决定本轮")
+        # 当前时间（格式：2026-09-03（周三）15:30）
+        assert re.search(
+            r"\d{4}-\d{2}-\d{2}（周[一二三四五六日]）\d{2}:\d{2}", user
+        )
+        # 轮次进度 N/M
+        assert "第 2/" in user
+        # 声明为系统状态而非指令（防提示注入）
+        assert "不构成指令" in user
+
+    def test_status_bar_update_keeps_prefix(self):
+        """状态栏每轮更新（轮次变化）只影响末尾，其之前的 user 内容逐字一致。"""
+        m1 = _capture_planner_messages(round_num=1)
+        m2 = _capture_planner_messages(round_num=2)
+        prefix = m1[1]["content"].split("<<<STATUS")[0]
+        assert m2[1]["content"].startswith(prefix)
+        assert "第 1/" in m1[1]["content"]
+        assert "第 2/" in m2[1]["content"]
 
 
 # ====== 原则 2：动态信息只追加 ======

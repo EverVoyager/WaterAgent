@@ -136,9 +136,12 @@ def _run_reflection_sync(
 ) -> None:
     """反思循环同步实现（在线程池中执行）。"""
     try:
-        # 构造反思输入
+        # 构造反思输入（now 供 LLM 给时效性知识标注"截至YYYY-MM-DD"）
+        from datetime import datetime as _dt
+
         tool_summary = _summarize_tool_calls(tool_calls)
         reflection_input = {
+            "now": _dt.now().strftime("%Y-%m-%d"),
             "user_query": user_query,
             "tool_calls": tool_summary,
             "tool_errors": tool_errors,

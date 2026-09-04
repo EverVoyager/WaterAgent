@@ -12,6 +12,7 @@ COMPACT_SYSTEM_PROMPT = """你是 Agent 的记忆压缩模块。给定同一类�
 2. 内容冲突（相互矛盾，如"警戒水位 377.5m" vs "警戒水位 378m"）→ action="replace"，content 用最新的那条（保留新记忆）
 3. 不冲突但可整合（相关但补充，如"get_weather 返回降水" + "get_weather 不返回气温"）→ action="merge"，content 写整合后的一句话
 4. 完全无关（不同主题）→ action="keep"，原样保留
+5. 含"截至YYYY-MM-DD"时间标注的知识冲突/重复时 → 以标注日期最新的一条为准，过期的丢弃
 
 输出严格的 JSON 数组，每个元素对应一条"最终保留的记忆"：
 [
@@ -32,7 +33,7 @@ COMPACT_SYSTEM_PROMPT = """你是 Agent 的记忆压缩模块。给定同一类�
 
 REFLECTION_SYSTEM_PROMPT = """你是防汛预警 Agent 的反思模块。基于本次对话过程，将值得长期保留的经验分发到五类记忆。
 
-输入是 JSON 格式的对话摘要（user_query、tool_calls、tool_errors、final_answer、injected_memories 等）。
+输入是 JSON 格式的对话摘要（now 当前日期、user_query、tool_calls、tool_errors、final_answer、injected_memories 等）。
 请分析以下问题：
 1. 是否有用户偏好/纠正/长期约束需要 Agent 永久记住？（→ longterm_edits）
 2. 是否有领域知识/事实值得沉淀？（→ semantic_memories）
@@ -54,15 +55,15 @@ REFLECTION_SYSTEM_PROMPT = """你是防汛预警 Agent 的反思模块。基于�
   "semantic_memories": [
     {
       "title": "知识点标题（如'龙门站警戒水位'）",
-      "content": "具体知识（含数值/规则，如'龙门站警戒水位 377.5m，保证水位 380.5m'）",
+      "content": "具体知识（含数值/规则，如'龙门站警戒水位 377.5m，保证水位 380.5m'。会随时间变化的须以'截至YYYY-MM-DD'开头标注，日期取输入 now）",
       "tags": ["可选标签"]
     }
   ],
   "episode": {
-    "event_summary": "发生了什么事（一句话，如'查询府谷站水情返回空数据'）",
+    "event_summary": "发生了什么事（一句话，以日期开头，如'2026-09-03 查询府谷站水情返回空数据'）",
     "resolution": "当时怎么解决的（如'改查吴堡站并向用户说明府谷无监测'）",
     "outcome": "success|failure|partial"
-  ],
+  },
   "procedure": {
     "worthy": true/false,
     "name": "方法名（如'汛期多站联合研判'，worthy=false 时留空）",
@@ -81,6 +82,13 @@ REFLECTION_SYSTEM_PROMPT = """你是防汛预警 Agent 的反思模块。基于�
 - longterm_edits 的 topic 用小写短横线命名（如 user-prefs）；content 是陈述句，多条同类可合并为一次 append
 - semantic_memories 必须含具体数值/规则，笼统表述不要
 - steps 的 action 是动宾短语（如"获取实时水情"），tool 是工具名（可为 null）
+
+【时效性标注 — 防止知识过期】
+- 永久有效的事实（站名、地理位置、法规编号等）：不加时间标注
+- 会随时间变化的事实（实时水情结论、年度阈值调整、临时管控措施、预报类结论）：
+  content 必须以"截至YYYY-MM-DD"开头标注基准日期（用输入中的 now），如
+  "截至2026-09-03，吴堡站流量537m³/s处于Ⅳ级区间"。超龄的时效知识会被系统
+  自动停止注入并清理，未标注且实为时效性的内容等同过期。
 
 【质量评分（class-first，宁缺毋滥）】
 每条 longterm_edits / semantic_memories 写入前自评：

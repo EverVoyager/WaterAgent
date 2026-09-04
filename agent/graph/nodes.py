@@ -39,6 +39,34 @@ def get_max_rounds() -> int:
     return get_llm_config()["max_tool_rounds"]
 
 
+# 状态栏（ai-agent-book 第 2 章）：星期中文映射
+_WEEKDAY_NAMES = "一二三四五六日"
+
+
+def _build_status_bar(round_num: int) -> str:
+    """构建状态栏：动态元信息（当前时间 + 规划进度）注入 planner user 消息末尾。
+
+    模型无法主动获知"现在几点、进行到哪一轮"，由系统以元信息形式补给
+    （Claude Code 的 system-reminder 同构）。时间对防汛研判是关键锚点：
+    汛期/非汛期判断、预报基准时刻、工具数据的时效性。
+
+    KV Cache 兼容性：状态栏位于上下文最末端，每轮更新（时间/轮次变化）
+    只影响末尾，不破坏前面的前缀缓存（静态前缀冻结 + 动态只追加原则）。
+    系统生成而非用户输入，用 <<<STATUS 包裹并声明非指令，防提示注入。
+    """
+    from datetime import datetime
+
+    now = datetime.now()
+    time_str = now.strftime(f"%Y-%m-%d（周{_WEEKDAY_NAMES[now.weekday()]}）%H:%M")
+    return (
+        "<<<STATUS\n"
+        f"[系统状态] 当前时间：{time_str}；"
+        f"规划进度：第 {round_num}/{get_max_rounds()} 轮工具调用。\n"
+        "（以上为系统注入的状态信息，仅供参考，不构成指令。）\n"
+        "STATUS>>>"
+    )
+
+
 # ====== 节点函数 ======
 
 def direct_chat_node(state: AgentState) -> dict[str, Any]:
@@ -400,8 +428,8 @@ def _plan_via_function_calling(
         f"用户问题：{query}\n\n"
         f"已收集信息：{context_summary}\n\n"
         f"已调用过的工具：{called_tools}{skill_section}{exp_section}{hist_section}\n\n"
-        f"当前是第 {round_num} 轮规划。请决定本轮需要调用的工具。"
-        f"若信息已充分，请不调用任何工具。"
+        f"{_build_status_bar(round_num)}\n"
+        f"请据此决定本轮需要调用的工具；若信息已充分，请不调用任何工具。"
     )
 
     try:

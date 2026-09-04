@@ -387,3 +387,67 @@ class TestReflectionEndToEnd:
         # 三类 store 均收到写入
         ms.return_value.add_semantic.assert_called_once()
         me.return_value.add_episode.assert_called_once()
+
+
+# ============ 时效性知识标注与过期判定 ============
+
+class TestKnowledgeFreshness:
+    """涉及时间的知识须标注"截至YYYY-MM-DD"，超龄不注入、Curator 清理。"""
+
+    def test_prompt_requires_as_of_annotation(self):
+        """反思提示词要求时效性知识标注基准日期，且反思输入含当前日期。"""
+        from agent.prompts.reflection import REFLECTION_SYSTEM_PROMPT
+
+        assert "截至YYYY-MM-DD" in REFLECTION_SYSTEM_PROMPT
+        assert "时效性标注" in REFLECTION_SYSTEM_PROMPT
+
+    def test_reflection_input_contains_now(self):
+        """反思输入 JSON 携带当前日期（供 LLM 标注基准日期）。"""
+
+        captured = {}
+
+        def fake_generate(reflection_input):
+            captured.update(reflection_input)
+            return {}
+
+        with patch.object(rf, "_generate_reflection", side_effect=fake_generate), \
+             patch.object(rf, "_write_audit"), \
+             patch.object(rf, "is_memory_enabled", return_value=False):
+            rf._run_reflection_sync(
+                "查询吴堡水情", "答案", [{"tool_name": "get_hydrology", "arguments": {}}],
+                [], 2, "multi_round", False,
+            )
+
+        assert "now" in captured
+        assert len(captured["now"]) == 10  # YYYY-MM-DD
+
+    def test_expired_as_of_knowledge(self):
+        """超过保质期的'截至'知识判定过期。"""
+        from datetime import date, timedelta
+
+        from agent.memory.experience import is_expired_semantic
+
+        old = (date.today() - timedelta(days=31)).strftime("%Y-%m-%d")
+        assert is_expired_semantic(f"截至{old}，吴堡站流量537m³/s") is True
+
+    def test_fresh_as_of_knowledge(self):
+        """保质期内的'截至'知识不判过期。"""
+        from datetime import date, timedelta
+
+        from agent.memory.experience import is_expired_semantic
+
+        fresh = (date.today() - timedelta(days=3)).strftime("%Y-%m-%d")
+        assert is_expired_semantic(f"截至{fresh}，吴堡站流量537m³/s") is False
+
+    def test_durable_knowledge_never_expires_by_date(self):
+        """无时间标注的长期事实（阈值/站名）不按时间过期。"""
+        from agent.memory.experience import is_expired_semantic
+
+        assert is_expired_semantic("吴堡站警戒水位为640.0米") is False
+
+    def test_malformed_date_not_expired(self):
+        """日期解析失败不误判过期。"""
+        from agent.memory.experience import is_expired_semantic
+
+        assert is_expired_semantic("截至2026-13-99，某站流量数据") is False
+        assert is_expired_semantic("") is False

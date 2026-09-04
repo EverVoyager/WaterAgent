@@ -18,7 +18,9 @@
   （语义记忆 hit_count++ / 程序记忆 use_count、success_count++）
 """
 import logging
+import re
 import threading
+from datetime import date, datetime
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -27,6 +29,29 @@ logger = logging.getLogger(__name__)
 _EPISODE_CAP = 2
 _PROCEDURE_CAP = 2
 _SEMANTIC_CAP = 3
+
+# 时效性知识保质期（天）：content 中"截至YYYY-MM-DD"早于该天数即过期，
+# 注入时跳过、Curator 治理时清理。无标注视为长期事实，不按时间过期。
+SEMANTIC_MAX_AGE_DAYS = 30
+
+_AS_OF_DATE_RE = re.compile(r"截至\s*(\d{4}-\d{2}-\d{2})")
+
+
+def is_expired_semantic(content: str, max_age_days: int = SEMANTIC_MAX_AGE_DAYS) -> bool:
+    """判断带"截至"日期标注的语义知识是否已过期。
+
+    反思写入时效性知识时约定以"截至YYYY-MM-DD"开头标注基准日期；
+    无标注视为长期事实（警戒水位类阈值、站名等），由 demote/压缩机制治理，
+    不做时间过期判定。日期解析失败同样不判过期（宁可用，不误删）。
+    """
+    m = _AS_OF_DATE_RE.search(content or "")
+    if not m:
+        return False
+    try:
+        as_of = datetime.strptime(m.group(1), "%Y-%m-%d").date()
+    except ValueError:
+        return False
+    return (date.today() - as_of).days > max_age_days
 
 
 # ============ 注入追踪（效果闭环）============
@@ -216,6 +241,10 @@ def get_semantic_knowledge(query: str | None) -> str:
         order = {h["id"]: i for i, h in enumerate(hits)}
         rows.sort(key=lambda r: order.get(r["id"], 999))
 
+    if not rows:
+        return ""
+    # 时效性知识过期即不注入（如"截至2025-08-01 某站流量…"已失去参考价值）
+    rows = [r for r in rows if not is_expired_semantic(str(r.get("content", "")))]
     if not rows:
         return ""
     for r in rows:

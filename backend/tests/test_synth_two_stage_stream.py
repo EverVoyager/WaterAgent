@@ -13,10 +13,14 @@
 import json
 from unittest.mock import MagicMock, patch
 
+from openai import APIError
+
 from agent.graph.synthesizer_node import (
     _SYNTH_META_SCHEMA,
     _build_synth_messages,
     _build_synth_system_content,
+    _call_synth_with_fallback,
+    _reset_response_format_memory,
     _stream_answer_via_llm,
     _synth_metadata_via_llm,
     _synth_via_llm_stream,
@@ -265,6 +269,69 @@ class TestStreamAnswerViaLlm:
 
 
 # ====== _synth_via_llm_stream 集成测试 ======
+
+
+# ====== response_format 降级记忆测试 ======
+
+def _make_400_unavailable() -> APIError:
+    """构造 DeepSeek 风格的 400：response_format 不可用。"""
+    err = APIError.__new__(APIError)
+    err.message = "This response_format type is unavailable now"
+    err.status_code = 400
+    return err
+
+
+class TestResponseFormatDowngradeMemory:
+    """json_schema 400 探测一次后记住，本进程后续直接从 json_object 开始。"""
+
+    def setup_method(self):
+        _reset_response_format_memory()
+
+    def teardown_method(self):
+        _reset_response_format_memory()
+
+    @staticmethod
+    def _client_400_on_json_schema_then_ok():
+        """json_schema 抛 400，其余格式成功的 mock client。"""
+        client = MagicMock()
+        ok = MagicMock()
+        ok.usage = None
+        client.chat.completions.create.side_effect = (
+            lambda **kw: (_ for _ in ()).throw(_make_400_unavailable())
+            if (kw.get("response_format") or {}).get("type") == "json_schema"
+            else ok
+        )
+        return client
+
+    def test_400_then_downgrade_then_remember(self):
+        """首次：json_schema 400 → json_object 成功；再次：直接 json_object（不再 400）。"""
+        client = self._client_400_on_json_schema_then_ok()
+        create = client.chat.completions.create
+
+        _call_synth_with_fallback(client, "m", [{"role": "user", "content": "x"}])
+        assert create.call_count == 2  # json_schema(400) + json_object(ok)
+
+        create.reset_mock()
+        _call_synth_with_fallback(client, "m", [{"role": "user", "content": "x"}])
+        assert create.call_count == 1  # 记忆生效，跳过 json_schema
+        fmt = create.call_args.kwargs.get("response_format")
+        assert fmt is not None and fmt.get("type") == "json_object"
+
+    def test_json_schema_success_keeps_strongest(self):
+        """端点支持 json_schema 时不降级，后续继续用 json_schema。"""
+        client = MagicMock()
+        ok = MagicMock()
+        ok.usage = None
+        client.chat.completions.create.return_value = ok
+
+        _call_synth_with_fallback(client, "m", [{"role": "user", "content": "x"}])
+        _call_synth_with_fallback(client, "m", [{"role": "user", "content": "x"}])
+
+        assert client.chat.completions.create.call_count == 2
+        for call in client.chat.completions.create.call_args_list:
+            fmt = call.kwargs.get("response_format")
+            assert fmt is not None and fmt.get("type") == "json_schema"
+
 
 class TestSynthViaLlmStreamIntegration:
     """两阶段集成：synth_meta → answer_delta → synth_answer_full。"""

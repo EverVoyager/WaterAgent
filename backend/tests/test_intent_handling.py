@@ -41,7 +41,8 @@ class TestPlannerPrompt:
         """planner 提示词应把概念解释类判定为无需工具，且规则对任意问题通用。"""
         client_mock, create_mock = _mock_planner_llm_no_tools()
         with patch("agent.graph.nodes.get_llm_client", return_value=client_mock), \
-             patch("agent.graph.nodes.get_llm_config", return_value={"model": "test"}):
+             patch("agent.graph.nodes.get_llm_config",
+                   return_value={"model": "test", "max_tool_rounds": 5}):
             _plan_via_function_calling("预警等级怎么划分", "")
 
         system = create_mock.chat.completions.create.call_args.kwargs["messages"][0]["content"]
