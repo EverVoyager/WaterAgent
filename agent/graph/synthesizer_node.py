@@ -46,18 +46,6 @@ logger = logging.getLogger(__name__)
 # 引用校验失败时的最大重生成次数
 _MAX_VERIFY_RETRIES = 2
 
-# response_format 降级记忆（进程级）：DeepSeek 等端点不支持 json_schema strict，
-# 若每次调用都先吃一个 400 再降级，会浪费一次无效往返。此处记住探测结果，
-# 后续 synthesizer 调用直接从上次结论开始尝试。
-# None = 未探测；True = json_schema 可用；False = 不可用，从 json_object 开始
-_SCHEMA_FORMAT_SUPPORTED: bool | None = None
-
-
-def _reset_response_format_memory() -> None:
-    """清空降级记忆（测试用）。"""
-    global _SCHEMA_FORMAT_SUPPORTED
-    _SCHEMA_FORMAT_SUPPORTED = None
-
 
 def synthesizer_node(state: AgentState) -> dict[str, Any]:
     """综合研判节点：LLM 综合所有工具结果生成最终回答。
@@ -97,15 +85,12 @@ def _call_synth_with_fallback(client, model: str, messages: list, schema=None):
     会消耗大量 token，1500 不够会导致 JSON 输出被截断。
     """
     primary_schema = schema or _SYNTH_RESPONSE_SCHEMA
-    # 尝试列表：从最强约束到最弱。进程内已探测过 json_schema 不可用
-    # （如 DeepSeek 端点）时跳过，直接从 json_object 开始，省一次 400 往返
-    global _SCHEMA_FORMAT_SUPPORTED
-    all_formats = [
+    # 尝试列表：从最强约束到最弱
+    formats = [
         ("json_schema", primary_schema),
         ("json_object", {"type": "json_object"}),
         ("none", None),
     ]
-    formats = all_formats[1:] if _SCHEMA_FORMAT_SUPPORTED is False else all_formats
     last_exc = None
     for label, fmt in formats:
         try:
@@ -114,8 +99,6 @@ def _call_synth_with_fallback(client, model: str, messages: list, schema=None):
                 kwargs["response_format"] = fmt
             resp = client.chat.completions.create(**kwargs)
             record_llm_usage("synthesizer", resp.usage)
-            if label == "json_schema":
-                _SCHEMA_FORMAT_SUPPORTED = True
             logger.info("[synthesizer] LLM 调用成功（response_format=%s）", label)
             return resp
         except (APITimeoutError, RateLimitError, APIConnectionError) as e:
@@ -124,14 +107,7 @@ def _call_synth_with_fallback(client, model: str, messages: list, schema=None):
         except APIError as e:
             # 400 BadRequest 通常是 response_format 不支持，降级重试
             if getattr(e, "status_code", None) == 400 and label != "none":
-                if label == "json_schema":
-                    _SCHEMA_FORMAT_SUPPORTED = False
-                    logger.warning(
-                        "[synthesizer] response_format=json_schema 不被当前端点支持"
-                        "（如 DeepSeek），本进程后续直接从 json_object 开始"
-                    )
-                else:
-                    logger.warning("[synthesizer] response_format=%s 不支持，降级重试：%s", label, str(e)[:120])
+                logger.warning("[synthesizer] response_format=%s 不支持，降级重试：%s", label, str(e)[:120])
                 last_exc = e
                 continue
             # 其他 APIError 直接抛

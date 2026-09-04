@@ -48,18 +48,6 @@ def run_curation_once() -> dict[str, int]:
                     if sem_store.delete_semantic(mid):
                         stats["pruned_semantic"] += 1
                         vector_index.remove_semantic(mid)
-                # 时效性知识过期清理："截至YYYY-MM-DD"超龄的知识删除（含向量）。
-                # 反思写入时效性结论时按约定标注基准日期，超龄即失去参考价值
-                try:
-                    from agent.memory.experience import is_expired_semantic
-                    for row in sem_store.list_semantic(limit=1000):
-                        mid = row.get("id")
-                        expired = mid and is_expired_semantic(str(row.get("content", "")))
-                        if expired and sem_store.delete_semantic(mid):
-                            stats["pruned_semantic"] += 1
-                            vector_index.remove_semantic(mid)
-                except Exception as e:
-                    logger.debug("[curator] 时效知识清理失败：%s", e)
         except Exception as e:
             logger.warning("[curator] 语义剪枝失败：%s", e)
 

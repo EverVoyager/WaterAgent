@@ -321,7 +321,6 @@ START → **planner**（Function Calling 规划 + 信息充分性判断）
 - **静态前缀冻结**：planner/synthesizer 的 system 分层（静态指令 → 长期记忆 → Skill 清单按 name 排序），tools schema 逐字稳定；测试锁定跨轮逐字一致
 - **动态只追加**：synthesizer Phase 2 system = Phase 1 system + 追加第二阶段指令（两阶段重发的大段工具结果命中同一前缀缓存）；planner 第 1 轮注入的经验/历史摘要写入 state 跨轮原样保留
 - **命中率观测**：流式开 `include_usage`，`llm_stats` 按节点聚合 `cached_tokens`（兼容 DeepSeek `prompt_cache_hit_tokens` / vLLM 字段命名），日志输出 `[llm-cache] node=... hit_rate=...%`
-- **状态栏**：planner user 消息末尾注入动态元信息（当前时间 + 规划进度 N/M 轮，`<<<STATUS>>>` 包裹防注入）——模型据此把握汛期时效与工具预算；位于上下文最末端，每轮更新不破坏前缀缓存
 
 #### 关键设计速查
 
