@@ -81,10 +81,22 @@ class Settings(BaseSettings):
     RATE_LIMIT_PER_MINUTE: int = 30
 
     # 上下文 token 压缩（借鉴 Codex compact.rs）
-    # history 总 token 超过此值时触发 LLM 摘要压缩
+    # history 总 token 超过此值时触发压缩
     HISTORY_MAX_TOKENS: int = 4000
     # 压缩时保留最近几轮原文（1 轮 = 1 问 1答 = 2 条消息）
     HISTORY_KEEP_RECENT_ROUNDS: int = 2
+    # 会话任务段落盘与按需还原（Context-Folding 工程化，
+    # 详见 docs/context-compression-research.md）：
+    # 超预算时早段折叠为冻结的结构化摘要（KV Cache 前缀稳定），
+    # 全文（含工具数据）落 MD 文件，按 query-段匹配按需还原
+    SESSION_ARCHIVE_ENABLED: bool = True
+    SESSION_ARCHIVE_DIR: str = "session_archive"
+    # 分段语义边界：相邻轮 query embedding 余弦低于阈值开新段
+    SESSION_SEGMENT_SIM_THRESHOLD: float = 0.5
+    # 按需还原：query-段匹配余弦阈值 / 最多还原段数 / 归档保留天数
+    SESSION_ARCHIVE_MATCH_THRESHOLD: float = 0.5
+    SESSION_ARCHIVE_TOP_K: int = 2
+    SESSION_ARCHIVE_MAX_AGE_DAYS: int = 30
 
     # MySQL 配置（自进化长期记忆存储）
     # 留空则禁用自进化（reflection 仍可运行但记忆不持久化）

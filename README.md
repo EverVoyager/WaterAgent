@@ -312,7 +312,7 @@ START → **planner**（Function Calling 规划 + 信息充分性判断）
 #### 会话持久化与上下文压缩
 
 - **会话**：MySQL 持久化，草稿态延迟创建（首次发送才建会话），流式完成后 PUT 全量同步
-- **压缩**：history 超 4000 token 保留近 2 轮原文、早轮 LLM 摘要为一条 system 消息（指纹缓存，失败降级截断）
+- **压缩（任务段折叠）**：history 超 4000 token 时早段折叠为**冻结的结构化段摘要**（相邻轮 query 语义相似度切分任务段，摘要生成一次即冻结——跨请求逐字一致，KV Cache 前缀稳定），近 2 轮原文保留；全文（含工具数据）落 `session_archive/*.md`，当前 query 与早段向量匹配时按需还原整段注入（Context-Folding 工程化）
 
 #### 上下文缓存（KV Cache 友好设计）
 
@@ -321,6 +321,7 @@ START → **planner**（Function Calling 规划 + 信息充分性判断）
 - **静态前缀冻结**：planner/synthesizer 的 system 分层（静态指令 → 长期记忆 → Skill 清单按 name 排序），tools schema 逐字稳定；测试锁定跨轮逐字一致
 - **动态只追加**：synthesizer Phase 2 system = Phase 1 system + 追加第二阶段指令（两阶段重发的大段工具结果命中同一前缀缓存）；planner 第 1 轮注入的经验/历史摘要写入 state 跨轮原样保留
 - **命中率观测**：流式开 `include_usage`，`llm_stats` 按节点聚合 `cached_tokens`（兼容 DeepSeek `prompt_cache_hit_tokens` / vLLM 字段命名），日志输出 `[llm-cache] node=... hit_rate=...%`
+- **状态栏**：planner user 消息末尾注入动态元信息（当前时间 + 规划进度 N/M 轮，`<<<STATUS>>>` 包裹防注入）——模型据此把握汛期时效与工具预算；位于上下文最末端，每轮更新不破坏前缀缓存
 
 #### 关键设计速查
 

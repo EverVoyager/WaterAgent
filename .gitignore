@@ -78,3 +78,6 @@ docs/
 # 系统级评估历史（报告/明细不入库；baseline.json 保留跟踪）
 evals/history/
 evals/FINDINGS.md
+
+# 会话任务段归档（压缩折叠的原文 + 工具数据，运行时生成）
+session_archive/

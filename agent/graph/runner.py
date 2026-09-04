@@ -38,8 +38,8 @@ logger = logging.getLogger(__name__)
 def _compact_history_entry(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """入口处压缩 history：根据 config 配置调用 compact_history。
 
-    未超 token 预算时零开销返回原 history；超预算时保留最近若干轮原文，
-    早轮用 LLM 总结成一条 system 摘要（借鉴 Codex compact.rs）。
+    未超 token 预算时零开销返回原 history；超预算时早段折叠为冻结的
+    结构化段摘要 + 近 N 轮原文（任务段落盘机制，见 session_archive.py）。
     """
     if not history:
         return history
@@ -49,6 +49,46 @@ def _compact_history_entry(history: list[dict[str, Any]]) -> list[dict[str, Any]
         max_tokens=settings.HISTORY_MAX_TOKENS,
         keep_recent_rounds=settings.HISTORY_KEEP_RECENT_ROUNDS,
     )
+
+
+def _recall_context_entry(user_query: str, raw_history: list[dict[str, Any]]) -> str:
+    """入口按需还原：query 与压缩窗口外的早段匹配，命中段全文注入。
+
+    返回空串表示无命中（embedding 不可用/无相关段）。异常全部吞掉，
+    绝不影响主流程。
+    """
+    try:
+        from agent.memory.session_archive import recall_relevant_segments
+
+        settings = get_settings()
+        return recall_relevant_segments(
+            user_query, raw_history, settings.HISTORY_KEEP_RECENT_ROUNDS,
+        )
+    except Exception as e:
+        logger.debug("[runner] 相关历史段还原失败（不影响主流程）：%s", e)
+        return ""
+
+
+def _maybe_archive_round(
+    raw_history: list[dict[str, Any]],
+    user_query: str,
+    final_answer: str,
+    tool_calls: list[dict[str, Any]] | None,
+    warning_level: str = "",
+) -> None:
+    """收尾归档：本轮（含工具轨迹）异步追加进所属任务段。
+
+    工具数据是前端 history 不含的关键增量（跨轮还原依赖它）。
+    异步执行，不阻塞响应。
+    """
+    try:
+        from agent.memory.session_archive import archive_completed_round_async
+
+        archive_completed_round_async(
+            raw_history, user_query, final_answer, tool_calls, warning_level,
+        )
+    except Exception as e:
+        logger.debug("[runner] 收尾归档失败（不影响主流程）：%s", e)
 
 
 # ====== 条件边 ======
@@ -136,6 +176,7 @@ def run_graph_agent(user_query: str, history: list[dict[str, Any]] = None) -> di
     initial_state: AgentState = {
         "user_query": user_query,
         "history": compacted_history,
+        "recalled_context": _recall_context_entry(user_query, history or []),
         "rounds": 0,
         "tool_results": {},
         "tool_calls": [],
@@ -144,6 +185,13 @@ def run_graph_agent(user_query: str, history: list[dict[str, Any]] = None) -> di
     # intent 由 planner 间接决定：无工具调用走 direct_chat → chitchat；否则 agent_task
     is_chitchat = not final_state.get("tool_calls") and final_state.get("rounds", 0) <= 1
     intent = "chitchat" if is_chitchat else "agent_task"
+    # 收尾归档：本轮（含工具轨迹）异步追加进所属任务段
+    _maybe_archive_round(
+        history or [], user_query,
+        final_state.get("final_answer", ""),
+        final_state.get("tool_calls", []),
+        "" if is_chitchat else final_state.get("warning_level", ""),
+    )
     return {
         "final_answer": final_state.get("final_answer", ""),
         "warning_level": "" if is_chitchat else final_state.get("warning_level", ""),
@@ -161,15 +209,21 @@ def _stream_chitchat_branch(
     history: list[dict[str, Any]],
     skill_instructions: str = "",
     cancel_event: threading.Event | None = None,
+    raw_history: list[dict[str, Any]] | None = None,
+    recalled_context: str = "",
 ):
     """闲聊分支：流式 LLM 对话。
 
     yields reasoning_step + answer_delta 事件，最终 yield done 事件。
+    raw_history：未压缩的原始 history（收尾归档用，缺省退回 history）。
     """
     yield {"type": "reasoning_step", "step": "direct_chat", "phase": "start",
            "message": "正在生成回复...", "details": {}}
     final_answer = ""
-    for ev in _direct_chat_stream(user_query, history or [], skill_instructions):
+    for ev in _direct_chat_stream(
+        user_query, history or [], skill_instructions,
+        recalled_context=recalled_context,
+    ):
         # 客户端已断开：停止消费 LLM 流，提前结束
         if cancel_event is not None and cancel_event.is_set():
             return
@@ -179,6 +233,8 @@ def _stream_chitchat_branch(
             final_answer = ev["content"]
     yield {"type": "reasoning_step", "step": "direct_chat", "phase": "done",
            "message": "回复生成完成", "details": {}}
+    # 收尾归档：本轮异步追加进所属任务段（闲聊无工具轨迹）
+    _maybe_archive_round(raw_history or history or [], user_query, final_answer, [])
     yield {
         "type": "done",
         "data": {
@@ -198,6 +254,7 @@ def _stream_planner_executor_loop(
     user_query: str,
     history: list[dict[str, Any]],
     cancel_event: threading.Event | None = None,
+    raw_history: list[dict[str, Any]] | None = None,
 ):
     """planner → executor 循环，直到 should_continue=False。
 
@@ -228,7 +285,8 @@ def _stream_planner_executor_loop(
             if round_num == 1:
                 yield from _stream_chitchat_branch(
                     user_query, history, state.get("skill_instructions", ""),
-                    cancel_event,
+                    cancel_event, raw_history=raw_history,
+                    recalled_context=state.get("recalled_context", ""),
                 )
                 return True
             # 后续轮次无工具，信息已充分，结束循环进 synthesizer
@@ -305,7 +363,10 @@ def _stream_synthesizer_phase(
     skill_instructions = state.get("skill_instructions", "")
     synth_meta = None
     final_answer = ""
-    for ev in _synth_via_llm_stream(user_query, tool_results, history, skill_instructions):
+    for ev in _synth_via_llm_stream(
+        user_query, tool_results, history, skill_instructions,
+        recalled_context=state.get("recalled_context", ""),
+    ):
         # 客户端已断开：停止消费 LLM token 流，提前结束
         if cancel_event is not None and cancel_event.is_set():
             return None, ""
@@ -402,6 +463,7 @@ def run_graph_agent_stream_v2(
         state: AgentState = {
             "user_query": user_query,
             "history": compacted_history,
+            "recalled_context": _recall_context_entry(user_query, history or []),
             "rounds": 0,
             "tool_results": {},
             "tool_calls": [],
@@ -410,6 +472,7 @@ def run_graph_agent_stream_v2(
         # planner → executor 循环（第 1 轮空工具会自动转入闲聊分支）
         went_chitchat = yield from _stream_planner_executor_loop(
             state, user_query, compacted_history, cancel_event,
+            raw_history=history or [],
         )
         if went_chitchat:
             return
@@ -436,6 +499,13 @@ def run_graph_agent_stream_v2(
 
         # 自进化：异步触发反思循环（不阻塞响应发送）
         _maybe_trigger_reflection(state, user_query, final_answer)
+
+        # 收尾归档：本轮（含工具轨迹）异步追加进所属任务段
+        _maybe_archive_round(
+            history or [], user_query, final_answer,
+            state.get("tool_calls", []),
+            (synth_meta or {}).get("warning_level", ""),
+        )
 
         yield {
             "type": "done",

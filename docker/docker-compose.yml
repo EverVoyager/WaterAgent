@@ -86,6 +86,8 @@ services:
       # 长期记忆双层文件（Agent 反思写入需持久化到宿主机）
       - ../MEMORY.md:/app/MEMORY.md
       - ../memory:/app/memory
+      # 会话任务段归档（压缩折叠的原文 + 工具数据，按需还原依赖它）
+      - ../session_archive:/app/session_archive
     ports:
       - "8000:8000"
 

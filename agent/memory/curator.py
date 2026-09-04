@@ -33,7 +33,7 @@ def run_curation_once() -> dict[str, int]:
     stats = {
         "pruned_semantic": 0, "archived_episodes": 0,
         "compacted": 0, "refined": 0, "promoted": 0,
-        "indexed": 0, "repaired_index_lines": 0,
+        "indexed": 0, "repaired_index_lines": 0, "archive_cleaned": 0,
     }
 
     # ===== 1. 剪枝 =====
@@ -58,6 +58,13 @@ def run_curation_once() -> dict[str, int]:
                 stats["archived_episodes"] = ep_store.delete_older_than(days=EPISODE_ARCHIVE_DAYS)
         except Exception as e:
             logger.warning("[curator] 情景归档失败：%s", e)
+
+    # ===== 1.5 会话任务段归档清理（超龄删除） =====
+    try:
+        from agent.memory.session_archive import cleanup_archive
+        stats["archive_cleaned"] = cleanup_archive()
+    except Exception as e:
+        logger.debug("[curator] 归档清理失败：%s", e)
 
     # ===== 2. 语义记忆 LLM 压缩 =====
     try:

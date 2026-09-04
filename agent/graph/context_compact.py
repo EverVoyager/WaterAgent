@@ -1,26 +1,21 @@
 """上下文 token 压缩（借鉴 Codex compact.rs + token_budget.rs）。
 
-策略：
+策略（任务段折叠版，替换早期的一次性 LLM 合并摘要，设计依据
+docs/context-compression-research.md）：
 1. 估算全部 history 的 token 数
 2. 未超预算 → 直接返回原 history（不调 LLM，零开销）
-3. 超预算 → 保留最近 N 轮原文，早轮用 LLM 总结成一条 system 摘要
+3. 超预算 → 交给 session_archive.compact_with_segments：
+   早段折叠为冻结的结构化摘要消息（每段一条，含"续摘要"追加），
+   近 N 轮原文保留；全文（含工具数据）落 MD 归档，按需匹配还原。
 
-LLM 摘要带缓存（history 指纹），相同历史不重复调用。
-LLM 摘要失败时降级为简单截断（每条保留首 200 字），不阻塞主流程。
+冻结摘要跨请求逐字一致（KV Cache 前缀稳定），摘要 LLM 失败时降级
+规则提取（不冻结），embedding 不可用时整体降级单段。
 """
-import hashlib
 import logging
 import re
 from typing import Any
 
-from agent.prompts.compact import COMPACT_HISTORY_SYSTEM_PROMPT
-from app.core.llm import LLM_TIMEOUTS, extract_content, get_llm_client, get_llm_config
-
 logger = logging.getLogger(__name__)
-
-# 摘要缓存：history 指纹 → 摘要文本。避免相同 history 重复调 LLM
-_SUMMARY_CACHE: dict[str, str] = {}
-_MAX_CACHE_SIZE = 50
 
 
 def estimate_tokens(text: str) -> int:
@@ -36,90 +31,18 @@ def estimate_tokens(text: str) -> int:
     return int(cjk_count / 1.5 + other_count / 4) + 1
 
 
-def _history_fingerprint(history: list[dict[str, Any]]) -> str:
-    """计算 history 指纹（基于每条消息的 role + content 全文）。
+def is_compacted_history(history: list[dict[str, Any]]) -> bool:
+    """判断 history 是否为压缩产物（开头含早段摘要 system 消息）。
 
-    注：早期版本 content 截断到前 300 字，长消息会碰撞出错误摘要缓存，
-    改为全文参与指纹计算。
+    兼容两种摘要标记：旧合并摘要 "[历史对话摘要]" 与任务段摘要
+    "[历史任务·N]"（session_archive 产出，可能多条）。
     """
-    parts = [f"{m.get('role', '')}:{m.get('content', '')}" for m in history]
-    return hashlib.md5("|".join(parts).encode("utf-8")).hexdigest()
-
-
-def _split_recent(
-    history: list[dict[str, Any]],
-    keep_rounds: int,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """把 history 分为 (待摘要部分, 保留原文部分)。
-
-    keep_rounds: 保留最近几轮（1 轮 = 1 问 1 答 = 2 条消息）
-    """
-    keep_msgs = keep_rounds * 2
-    if len(history) <= keep_msgs:
-        return [], history
-    return history[:-keep_msgs], history[-keep_msgs:]
-
-
-def _summarize_via_llm(history: list[dict[str, Any]]) -> str:
-    """调用 LLM 把历史对话总结成摘要。
-
-    带缓存：相同 history 指纹返回缓存结果。
-    LLM 失败时返回空字符串（由调用方降级为截断）。
-    """
-    fp = _history_fingerprint(history)
-    if fp in _SUMMARY_CACHE:
-        logger.debug("[compact] 命中摘要缓存 fp=%s", fp[:8])
-        return _SUMMARY_CACHE[fp]
-
-    conversation_text = "\n".join(
-        f"{m.get('role', 'user')}：{m.get('content', '')[:500]}"
-        for m in history
-    )
-
-    system_prompt = COMPACT_HISTORY_SYSTEM_PROMPT
-    user_prompt = f"待压缩的对话历史：\n{conversation_text}\n\n请输出摘要："
-
-    try:
-        settings = get_llm_config()
-        client = get_llm_client().with_options(timeout=LLM_TIMEOUTS["chat"])
-        resp = client.chat.completions.create(
-            model=settings["model"],
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.1,
-            max_tokens=512,
-        )
-        summary = extract_content(resp.choices[0].message).strip()
-        if not summary:
-            logger.warning("[compact] LLM 摘要返回空内容")
-            return ""
-
-        # 写入缓存（满了先清空）
-        if len(_SUMMARY_CACHE) >= _MAX_CACHE_SIZE:
-            _SUMMARY_CACHE.clear()
-        _SUMMARY_CACHE[fp] = summary
-        logger.info("[compact] LLM 摘要成功 fp=%s 摘要=%s", fp[:8], summary[:80])
-        return summary
-    except Exception as e:
-        logger.warning("[compact] LLM 摘要失败，降级为截断：%s", e)
-        return ""
-
-
-def _truncate_history(
-    history: list[dict[str, Any]], max_chars_per_msg: int = 200
-) -> str:
-    """降级策略：LLM 摘要不可用时，每条消息保留首 N 字拼接成文本。"""
-    parts = []
-    for m in history:
-        role = m.get("role", "user")
-        content = m.get("content", "")
-        truncated = content[:max_chars_per_msg]
-        if len(content) > max_chars_per_msg:
-            truncated += "..."
-        parts.append(f"{role}：{truncated}")
-    return "\n".join(parts)
+    for m in (history or [])[:8]:
+        if m.get("role") == "system":
+            c = m.get("content", "") or ""
+            if "[历史对话摘要]" in c or "[历史任务" in c:
+                return True
+    return False
 
 
 def compact_history(
@@ -129,15 +52,8 @@ def compact_history(
 ) -> list[dict[str, Any]]:
     """压缩历史对话，控制在 token 预算内。
 
-    策略（借鉴 Codex compact.rs）：
-    1. 估算全部 history 的 token
-    2. 未超预算 → 直接返回原 history（不调 LLM，零开销）
-    3. 超预算 → 保留最近 keep_recent_rounds 轮原文，早轮用 LLM 总结成一条 system 摘要
-
-    Returns:
-        压缩后的 history，格式为：
-        [{"role":"system","content":"[历史对话摘要]\\n..."}, ...最近几轮原文]
-        未超预算时返回原 history（不变）。
+    未超预算返回原 history（零开销）；超预算交给任务段折叠
+    （早段冻结摘要 + 近 N 轮原文，见 agent/memory/session_archive.py）。
     """
     if not history:
         return history
@@ -151,24 +67,13 @@ def compact_history(
         return history
 
     logger.info(
-        "[compact] history tokens=%d > budget=%d, compacting (keep %d rounds)",
+        "[compact] history tokens=%d > budget=%d, compacting by segments (keep %d rounds)",
         total_tokens, max_tokens, keep_recent_rounds,
     )
 
-    to_summarize, recent = _split_recent(history, keep_recent_rounds)
-    if not to_summarize:
-        # 保留窗口已覆盖全部 history（keep_recent_rounds 太大）
-        return history
+    from agent.memory.session_archive import compact_with_segments
 
-    summary = _summarize_via_llm(to_summarize)
-    if not summary:
-        # LLM 摘要失败，降级为简单截断
-        summary = _truncate_history(to_summarize)
-
-    return [
-        {"role": "system", "content": f"[历史对话摘要]\n{summary}"},
-        *recent,
-    ]
+    return compact_with_segments(history, keep_recent_rounds)
 
 
 def extract_history_context(history: list[dict[str, Any]]) -> str:

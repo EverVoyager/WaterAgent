@@ -26,6 +26,7 @@ def _direct_chat_stream(
     query: str,
     history: list[dict[str, Any]],
     skill_instructions: str = "",
+    recalled_context: str = "",
 ):
     """流式版本的闲聊生成器。使用 LLM stream=True，逐 token yield answer_delta。
 
@@ -69,17 +70,17 @@ def _direct_chat_stream(
         )
 
     messages = [{"role": "system", "content": system_content}]
-    # 压缩过的 history（首条 system 摘要）整体已受 token 预算控制，全量使用；
-    # 未压缩的 history 截断到最近 3 轮（6 条）避免 token 超限
-    is_compacted = (
-        bool(history)
-        and history[0].get("role") == "system"
-        and "[历史对话摘要]" in history[0].get("content", "")
-    )
-    history_slice = history if is_compacted else history[-6:]
+    # 压缩过的 history（含早段摘要 system 消息）整体已受 token 预算控制，
+    # 全量使用；未压缩的 history 截断到最近 3 轮（6 条）避免 token 超限
+    from agent.graph.context_compact import is_compacted_history
+    history_slice = history if is_compacted_history(history) else history[-6:]
     for m in history_slice:
         messages.append({"role": m.get("role", "user"), "content": m.get("content", "")})
-    messages.append({"role": "user", "content": query})
+    # 按需还原的相关历史任务段：合并进当前 user 消息末尾（KV Cache 前缀友好）
+    user_content = query
+    if recalled_context:
+        user_content = query + "\n\n" + recalled_context
+    messages.append({"role": "user", "content": user_content})
 
     try:
         stream = client.chat.completions.create(

@@ -7,9 +7,9 @@
 """
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-from agent.graph.nodes import _plan_via_function_calling
+from agent.graph.nodes import _build_planner_system_prompt
 from agent.prompts import DIRECT_CHAT_PROMPT
 
 
@@ -38,16 +38,13 @@ class TestDirectChatPrompt:
 
 class TestPlannerPrompt:
     def test_prompt_has_general_concept_rule(self):
-        """planner 提示词应把概念解释类判定为无需工具，且规则对任意问题通用。"""
-        client_mock, create_mock = _mock_planner_llm_no_tools()
-        with patch("agent.graph.nodes.get_llm_client", return_value=client_mock), \
-             patch("agent.graph.nodes.get_llm_config", return_value={"model": "test"}):
-            _plan_via_function_calling("预警等级怎么划分", "")
-
-        system = create_mock.chat.completions.create.call_args.kwargs["messages"][0]["content"]
+        """planner 系统提示词应把概念解释类判定为无需工具，且规则对任意问题通用。"""
+        system = _build_planner_system_prompt()
         assert "概念解释" in system
         assert "返回空工具调用列表" in system
         assert "即使当前激活的 Skill 指令里写有工具流程" in system
+        # 影响类/趋势类查询必须调工具（路由边界摇摆的修复）
+        assert "影响或趋势" in system
 
 
 class TestWarningLevelSkillConfig:
