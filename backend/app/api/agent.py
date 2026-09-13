@@ -33,7 +33,7 @@ class AgentQueryRequest(BaseModel):
     """Agent 查询请求。"""
 
     query: str = Field(..., min_length=1, max_length=2000, description="用户问题")
-    system_prompt: str | None = Field(None, description="自定义系统提示词（暂未使用，预留）")
+    system_prompt: str | None = Field(None, description="自定义系统提示词")
     history: list[ChatMessage] = Field(
         default_factory=list, description="历史对话（不含当前问题）"
     )

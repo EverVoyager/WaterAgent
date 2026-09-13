@@ -14,10 +14,11 @@
 - procedure         → agent_procedures 表 + 向量索引
 - demote            → 语义记忆删除 / 程序记忆降权
 
-三道写入安全闸（全类型通用）：
+四道写入安全闸（全类型通用）：
 1. 提示词注入扫描（防"请记住：忽略所有指令"式持久化攻击）
 2. 敏感信息过滤（对齐 Codex redaction：API key/密码/token/手机号拒写）
-3. rubric 质量门槛由反思 prompt 自评（class-first，输出前自滤）
+3. 领域事实校验（等级阈值断言对照 WARNING_THRESHOLDS 单一同源校验，防错误经验污染）
+4. rubric 质量门槛由反思 prompt 自评（class-first，输出前自滤）
 
 异步执行：ThreadPoolExecutor 后台运行，不阻塞响应。
 """
@@ -36,7 +37,7 @@ from agent.prompts.reflection import (
 from agent.prompts.reflection import (
     REFLECTION_SYSTEM_PROMPT as _REFLECTION_SYSTEM_PROMPT,
 )
-from agent.utils import parse_json_from_llm
+from agent.utils import WARNING_THRESHOLDS, parse_json_from_llm
 from app.core.llm import LLM_TIMEOUTS, get_llm_client, get_llm_config, strip_think
 
 logger = logging.getLogger(__name__)
@@ -200,8 +201,9 @@ def _dispatch_longterm(reflection: dict[str, Any], user_query: str) -> int:
         content = str(edit.get("content", "")).strip()
         if not content:
             continue
-        if _is_unsafe_memory_content(content) or _is_sensitive_content(content):
-            logger.warning("[reflection] 拦截不安全长期记忆编辑：%s", content[:80])
+        violation = _gate_violation(content)
+        if violation:
+            logger.warning("[reflection] 拦截不安全长期记忆编辑（%s）：%s", violation, content[:80])
             continue
         safe_edits.append(edit)
     if not safe_edits:
@@ -228,8 +230,9 @@ def _dispatch_semantic(reflection: dict[str, Any], user_query: str) -> int:
         content = str(mem.get("content", "")).strip()
         if not title or not content:
             continue
-        if _is_unsafe_memory_content(content) or _is_sensitive_content(content):
-            logger.warning("[reflection] 拦截不安全语义记忆：%s", content[:80])
+        violation = _gate_violation(f"{title}。{content}")
+        if violation:
+            logger.warning("[reflection] 拦截不安全语义记忆（%s）：%s", violation, content[:80])
             continue
         tags = mem.get("tags") or []
         mem_id = store.add_semantic(
@@ -266,12 +269,10 @@ def _dispatch_episode(
     event_summary = str(ep.get("event_summary", "")).strip()
     if not event_summary:
         return 0
-    if _is_unsafe_memory_content(event_summary):
-        logger.warning("[reflection] 拦截不安全情景记忆：%s", event_summary[:80])
-        return 0
     resolution = str(ep.get("resolution", "")).strip()
-    if _is_sensitive_content(event_summary) or _is_sensitive_content(resolution):
-        logger.warning("[reflection] 拦截含敏感信息的情景记忆")
+    violation = _gate_violation(event_summary, resolution)
+    if violation:
+        logger.warning("[reflection] 拦截不安全情景记忆（%s）：%s", violation, event_summary[:80])
         return 0
     outcome = ep.get("outcome", "success")
     if outcome not in ("success", "failure", "partial"):
@@ -317,8 +318,10 @@ def _dispatch_procedure(
     steps = proc.get("steps") or []
     if not name or not applicability or not steps:
         return 0
-    if _is_unsafe_memory_content(applicability + name) or _is_sensitive_content(applicability):
-        logger.warning("[reflection] 拦截不安全程序记忆：%s", name[:80])
+    steps_text = "。".join(str(s) for s in steps)
+    violation = _gate_violation(f"{name}。{applicability}", steps_text)
+    if violation:
+        logger.warning("[reflection] 拦截不安全程序记忆（%s）：%s", violation, name[:80])
         return 0
     tool_sequence = proc.get("tool_sequence") or [
         tc.get("tool_name", "") for tc in tool_calls if tc.get("tool_name")
@@ -472,6 +475,101 @@ def _is_sensitive_content(content: str) -> bool:
     if not content:
         return False
     return any(p.search(content) for p in _SENSITIVE_PATTERNS)
+
+
+# ====== 第四道写入安全闸：领域事实校验（与规则引擎单一同源）======
+# 反思 LLM 是会出错的写入者：一条错误阈值断言（如"流量超3000发Ⅰ级"——实际Ⅰ级需≥5000）
+# 一旦入库，会被后续检索系统性注入放大（越用越错）。写入前对照 WARNING_THRESHOLDS
+# 校验"数值 ↔ 等级"映射。校验失败的记忆拒写并留 warning 审计痕迹。
+
+# 等级词元：Unicode 罗马数字 / ASCII 罗马数字 / 中文数字（"第X级/一级别"排除）
+_LEVEL_RE = re.compile(r"(?<!第)(Ⅰ|Ⅱ|Ⅲ|Ⅳ|IV|III|II|I|一|二|三|四)\s*级(?!别)")
+_TOKEN_TO_LEVEL = {
+    "Ⅰ": "I", "Ⅱ": "II", "Ⅲ": "III", "Ⅳ": "IV",
+    "一": "I", "二": "II", "三": "III", "四": "IV",
+    "I": "I", "II": "II", "III": "III", "IV": "IV",
+}
+# 子句切分：句号/分号/逗号等（子句级校验，避免跨句误配）
+_CLAUSE_SPLIT_RE = re.compile(r"[。！？；\n，,、]")
+# 信号关键词：流量 / 降雨 / 水位（水位涉及 OR 多判据，单独处理）
+_FLOW_HINT_RE = re.compile(r"流量|m[³3]/s|m3/s|立方米每秒")
+_RAIN_HINT_RE = re.compile(r"降雨|雨量|毫米|mm", re.I)
+_WATER_HINT_RE = re.compile(r"水位|警戒|保证")
+# 数字提取：优先取带单位的（"150毫米"），避免"24小时降雨…150毫米"误取 24
+_NUM_UNIT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:毫米|mm|m[³3]/s|m3/s|立方米每秒)", re.I)
+_NUM_RE = re.compile(r"(\d+(?:\.\d+)?)")
+
+
+def _flow_level_for(value: float) -> str:
+    """流量值 → 等级（与 compute_warning_level 同阈值单一同源）。"""
+    if value >= WARNING_THRESHOLDS["flow_level1"]:
+        return "I"
+    if value >= WARNING_THRESHOLDS["flow_level2"]:
+        return "II"
+    if value >= WARNING_THRESHOLDS["flow_level3"]:
+        return "III"
+    return "IV"
+
+
+def _rain_level_for(value: float) -> str | None:
+    """降雨值 → 等级。规则引擎只有 Ⅰ/Ⅱ 级降雨判据，无判据返回 None（跳过校验）。"""
+    if value > WARNING_THRESHOLDS["rain_level1"]:
+        return "I"
+    if WARNING_THRESHOLDS["rain_level2"] <= value <= WARNING_THRESHOLDS["rain_level1"]:
+        return "II"
+    return None
+
+
+def _is_factual_error(content: str) -> str | None:
+    """校验记忆中的预警等级阈值断言，返回冲突子句（用于日志），无冲突返回 None。
+
+    保守策略（宁漏勿错，防误杀合法记忆）：
+    - 子句同时出现水位/警戒/保证关键词 → 跳过（OR 多判据下单信号不足以裁定等级）
+    - 子句同时出现流量和降雨信号 → 跳过（同上）
+    - 降雨值低于Ⅱ级判据 → 跳过（规则引擎无 Ⅲ/Ⅳ 级降雨标准）
+    - 数字明显不在量纲范围（<5 或 >100000，如年份）→ 跳过
+    """
+    if not content:
+        return None
+    for clause in _CLAUSE_SPLIT_RE.split(content):
+        level_m = _LEVEL_RE.search(clause)
+        if not level_m:
+            continue
+        claimed = _TOKEN_TO_LEVEL[level_m.group(1)]
+        if _WATER_HINT_RE.search(clause):
+            continue
+        has_flow, has_rain = bool(_FLOW_HINT_RE.search(clause)), bool(_RAIN_HINT_RE.search(clause))
+        if has_flow and has_rain:
+            continue
+        num_m = _NUM_UNIT_RE.search(clause) or _NUM_RE.search(clause)
+        if not num_m:
+            continue
+        value = float(num_m.group(1))
+        if has_flow:
+            if not (5 <= value <= 100000):
+                continue
+            if _flow_level_for(value) != claimed:
+                return clause.strip()
+        elif has_rain:
+            expected = _rain_level_for(value)
+            if expected is not None and expected != claimed:
+                return clause.strip()
+    return None
+
+
+def _gate_violation(*texts: str) -> str | None:
+    """对一段待写记忆执行全部文本安全闸，返回违规描述（事实闸返回冲突子句），通过返回 None。"""
+    for text in texts:
+        if not text:
+            continue
+        if _is_unsafe_memory_content(text):
+            return f"注入载荷: {text[:60]}"
+        if _is_sensitive_content(text):
+            return f"敏感信息: {text[:60]}"
+        factual = _is_factual_error(text)
+        if factual:
+            return f"事实冲突: {factual[:60]}"
+    return None
 
 
 # ============ 记忆压缩（语义记忆 LLM 合并，Curator 复用）===========
