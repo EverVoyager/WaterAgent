@@ -14,7 +14,6 @@
 """
 from agent.graph.context_compact import estimate_tokens
 from app.core.config import get_settings
-
 from evals.cases import CAP_MEMORY, CAP_NEEDLE, CASE_TYPES, EvalCase
 
 
@@ -41,20 +40,25 @@ def coverage_report(cases: list[EvalCase]) -> dict:
     }
 
 
-def coverage_gaps(cases: list[EvalCase]) -> list[str]:
-    """返回覆盖缺口描述列表（空列表 = 覆盖完备）。"""
+def coverage_gaps(cases: list[EvalCase], expected_types: tuple | None = None) -> list[str]:
+    """返回覆盖缺口描述列表（空列表 = 覆盖完备）。
+
+    expected_types: 期望非空的用例类型（None=全部已声明类型，即完整集口径）。
+    子集场景（实验案例集）只检查自己声明的类型，不误报"其他类型为空"。
+    """
     report = coverage_report(cases)
     gaps: list[str] = []
 
-    for ctype, n in report["by_type"].items():
-        if n == 0:
+    types_expected = tuple(expected_types) if expected_types is not None else CASE_TYPES
+    for ctype in types_expected:
+        if report["by_type"].get(ctype, 0) == 0:
             gaps.append(f"用例类型 {ctype} 为空")
 
-    # 出现过的类型对应的能力必须有非零覆盖（能力维度）
-    for cap in (CAP_MEMORY, CAP_NEEDLE):
-        if report["by_capability"].get(cap, 0) == 0 and any(
-            c.case_type in ("memory", "compression") for c in cases
-        ):
+    # 出现过的类型对应的能力必须有非零覆盖（能力维度，
+    # 按类型各自守门——记忆子集不要求针保留，反之亦然）
+    for cap, owner_type in ((CAP_MEMORY, "memory"), (CAP_NEEDLE, "compression")):
+        if report["by_type"].get(owner_type, 0) > 0 \
+                and report["by_capability"].get(cap, 0) == 0:
             gaps.append(f"能力标签 {cap} 无用例覆盖")
 
     for level in ("I", "II", "III", "IV"):
@@ -77,15 +81,14 @@ def coverage_gaps(cases: list[EvalCase]) -> list[str]:
             if any(n in "".join(m.get("content", "") for m in recent)
                    for n in c.needle_substrings):
                 gaps.append(f"{c.case_id} 针埋在近 {keep_rounds} 轮原文内（不构成压缩考验）")
-        if c.case_type == "memory":
-            if not c.memory_payload or not c.needle_substrings:
-                gaps.append(f"{c.case_id} 缺 memory_payload 或 needle_substrings")
+        if c.case_type == "memory" and (not c.memory_payload or not c.needle_substrings):
+            gaps.append(f"{c.case_id} 缺 memory_payload 或 needle_substrings")
     return gaps
 
 
-def assert_full_coverage(cases: list[EvalCase]) -> None:
+def assert_full_coverage(cases: list[EvalCase], expected_types: tuple | None = None) -> None:
     """覆盖完备断言（CI 门禁用，缺口直接抛 AssertionError）。"""
-    gaps = coverage_gaps(cases)
+    gaps = coverage_gaps(cases, expected_types=expected_types)
     if gaps:
         detail = "\n".join(f"  - {g}" for g in gaps)
         raise AssertionError(f"评估集覆盖缺口 {len(gaps)} 处：\n{detail}")

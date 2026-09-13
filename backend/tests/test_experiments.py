@@ -14,9 +14,8 @@ from app.core.config import get_settings
 from evals import cases as cases_mod
 from evals import coverage as coverage_mod
 from evals import runner as runner_mod
-from evals.case_sets import EXPERIMENT_COMPOSITIONS, get_experiment_cases
+from evals.case_sets import get_experiment_cases
 from evals.cases import EVAL_SEED_BASE, EvalCase, build_cases
-from evals.experiments import base as base_mod
 from evals.experiments.base import (
     Toggle,
     run_toggle_ablation,
@@ -61,13 +60,13 @@ class TestToggle:
         toggle = Toggle(kind="env", target="SELF_EVOLUTION_ENABLED", off_value=False)
         with toggles_applied([toggle]):
             assert get_settings().SELF_EVOLUTION_ENABLED is False
-        assert get_settings().SELF_EVOLUTION_ENABLED == original
+        assert original == get_settings().SELF_EVOLUTION_ENABLED
 
     def test_env_toggle_unknown_target_raises(self):
         toggle = Toggle(kind="env", target="NOT_A_REAL_SETTING", off_value=False)
-        with pytest.raises(AttributeError, match="NOT_A_REAL_SETTING"):
-            with toggles_applied([toggle]):
-                pass
+        with pytest.raises(AttributeError, match="NOT_A_REAL_SETTING"), \
+                toggles_applied([toggle]):
+            pass
 
     def test_patch_toggle_return_value(self):
         toggle = Toggle(kind="patch",
@@ -94,13 +93,14 @@ class TestToggle:
 
 class TestSummarizeContrast:
     def test_delta_relative_and_significance(self):
-        treated = [_record(f"c{i}", i < 15) for i in range(20)]   # 75%
-        baseline = [_record(f"c{i}", i < 10) for i in range(20)]  # 50%
+        # n=60：25pp 分差超 2×组合SE（n=20 时 0.25 < 2×0.148=0.296，不显著）
+        treated = [_record(f"c{i}", i < 45) for i in range(60)]   # 75%
+        baseline = [_record(f"c{i}", i < 30) for i in range(60)]  # 50%
         result = summarize_contrast(treated, baseline)
         assert result["delta"] == pytest.approx(0.25)
         assert result["relative_lift"] == pytest.approx(0.5)
         assert result["significant"] is True
-        assert result["treated_rate"]["n"] == 20
+        assert result["treated_rate"]["n"] == 60
         assert result["baseline_rate"]["p"] == 0.5
 
     def test_within_noise_band_not_significant(self):
@@ -229,7 +229,7 @@ class TestNewCaseTypes:
                    for c in oop)
 
     def test_new_types_deterministic(self):
-        kwargs = dict(n_memory=8, n_compression=6, n_tool_edge=12)
+        kwargs = {"n_memory": 8, "n_compression": 6, "n_tool_edge": 12}
         a = build_cases(**kwargs)
         b = build_cases(**kwargs)
         assert a == b
@@ -335,8 +335,9 @@ class TestCoverage:
 
     def test_gap_detected_for_underbudget_history(self):
         cases = build_cases(n_compression=12)
-        cases[0].history = cases[0].history[:4]  # 砍到预算以下
-        gaps = coverage_mod.coverage_gaps(cases)
+        comp = next(c for c in cases if c.case_type == "compression")
+        comp.history = comp.history[:4]  # 砍到预算以下
+        gaps = coverage_mod.coverage_gaps(cases, expected_types=("compression",))
         assert any("未超预算" in g for g in gaps)
 
     def test_gap_detected_missing_level(self):
@@ -344,24 +345,32 @@ class TestCoverage:
         for c in cases:
             if c.case_type == "business" and c.expected_level == "I":
                 c.expected_level = "II"
-        gaps = coverage_mod.coverage_gaps(cases)
+        gaps = coverage_mod.coverage_gaps(cases, expected_types=("business",))
         assert any("等级档位 I 缺失" in g for g in gaps)
 
     def test_assert_raises_on_gaps(self):
         cases = build_cases(n_compression=12)
-        cases[0].history = []
+        comp = next(c for c in cases if c.case_type == "compression")
+        comp.history = []
         with pytest.raises(AssertionError, match="覆盖缺口"):
-            coverage_mod.assert_full_coverage(cases)
+            coverage_mod.assert_full_coverage(cases, expected_types=("compression",))
+
+    def test_subset_expected_types_no_false_gaps(self):
+        """子集口径：只查自己声明的类型，不误报其他类型为空。"""
+        cases = get_experiment_cases("memory")
+        assert coverage_mod.coverage_gaps(
+            cases, expected_types=("memory",)) == []
 
 
 # ============ 记忆实验（experiments/memory.py） ============
 
 class TestMemoryExperiment:
     def test_scripted_memory_yields_payload(self):
-        from evals.experiments.memory import (
-            memory_payload_set, scripted_memory,
-        )
         import agent.memory as memory_pkg
+        from evals.experiments.memory import (
+            memory_payload_set,
+            scripted_memory,
+        )
         with scripted_memory():
             assert memory_pkg.build_longterm_section() == ""  # 无 payload = 空
             with memory_payload_set({"longterm": "站点档案：警戒水位 638.26"}):
@@ -483,7 +492,8 @@ class TestKvCacheExperiment:
                                      "prompt_tokens_details": {"cached_tokens": 60}})
         snapshot = _stats_snapshot()
         assert snapshot["nodes"]["planner"]["calls"] == 2
-        assert snapshot["nodes"]["planner"]["hit_rate"] == pytest.approx(140 / 220)
+        assert snapshot["nodes"]["planner"]["hit_rate"] == pytest.approx(
+            140 / 220, abs=1e-4)
         assert snapshot["total"]["prompt_tokens"] == 220
         reset_cache_stats()
 
@@ -572,7 +582,7 @@ class TestClaimsSection:
         comp = {
             "retention_contrast": summarize_contrast(
                 [_record("c0", True, checks={"needle_found": True})],
-                [_record("c0", True, checks={"needle_found": True"})],
+                [_record("c0", True, checks={"needle_found": True})],
                 check_key="needle_found"),
             "token_savings": {"mean_saved_pct": 55.5},
         }

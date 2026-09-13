@@ -83,7 +83,7 @@ def run_memory_experiment(cases: list, model_label: str = "") -> dict:
     by_subtype: dict[str, dict] = {}
     # 子类从 case 序号反查（mem-NNN 的 fact/update/temporal 轮换顺序在 cases.py 固定）
     subtype_of = {}
-    for case, record in zip(cases, with_records, strict=False):
+    for case, _record in zip(cases, with_records, strict=False):
         idx = int(case.case_id.rsplit("-", 1)[1])
         subtype = ("fact", "fact", "update", "temporal")[idx % 4]
         subtype_of[case.case_id] = subtype

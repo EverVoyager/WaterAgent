@@ -88,9 +88,8 @@ def _stats_snapshot() -> dict:
 
 def run_kv_cache_experiment(station: str = "吴堡", model_label: str = "") -> dict:
     """前缀冻结 vs 破坏：同会话脚本各跑一遍，比对 llm_stats 命中率。"""
-    from app.core.llm_stats import reset_cache_stats
-
     import agent.graph.nodes as nodes_mod
+    from app.core.llm_stats import reset_cache_stats
 
     # 冻结版：生产行为（统计隔离：每版跑前清零）
     reset_cache_stats()

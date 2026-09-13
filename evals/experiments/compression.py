@@ -16,10 +16,8 @@ token 节省为离线确定性测量（不经 LLM 回答，压缩本身按需调
 """
 import logging
 from contextlib import contextmanager
-from unittest.mock import patch
 
-from evals.experiments.base import summarize_contrast, toggles_applied
-from evals.experiments.base import Toggle
+from evals.experiments.base import Toggle, summarize_contrast, toggles_applied
 from evals.runner import run_case
 
 logger = logging.getLogger(__name__)

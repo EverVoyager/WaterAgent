@@ -108,70 +108,70 @@ def experiment_claims(name: str, result: dict) -> list[dict]:
     claims: list[dict] = []
     if name == "memory":
         c = result["contrast"]
-        claims.append(dict(
-            mechanism="记忆注入（脚本化）", metric="用例通过率",
-            baseline=_fmt_contrast_rate(c["baseline_rate"]),
-            treated=_fmt_contrast_rate(c["treated_rate"]),
-            delta=c["delta"], relative=c["relative_lift"],
-            significant=c["significant"], n=c["n_cases"],
-            extras="子类见明细",
-        ))
+        claims.append({
+            "mechanism": "记忆注入（脚本化）", "metric": "用例通过率",
+            "baseline": _fmt_contrast_rate(c["baseline_rate"]),
+            "treated": _fmt_contrast_rate(c["treated_rate"]),
+            "delta": c["delta"], "relative": c["relative_lift"],
+            "significant": c["significant"], "n": c["n_cases"],
+            "extras": "子类见明细",
+        })
         nc = result.get("needle_contrast")
         if nc:
-            claims.append(dict(
-                mechanism="记忆注入（脚本化）", metric="针召回率（答案含记忆事实）",
-                baseline=_fmt_contrast_rate(nc["baseline_rate"]),
-                treated=_fmt_contrast_rate(nc["treated_rate"]),
-                delta=nc["delta"], relative=nc["relative_lift"],
-                significant=nc["significant"], n=nc["n_cases"], extras="",
-            ))
+            claims.append({
+                "mechanism": "记忆注入（脚本化）", "metric": "针召回率（答案含记忆事实）",
+                "baseline": _fmt_contrast_rate(nc["baseline_rate"]),
+                "treated": _fmt_contrast_rate(nc["treated_rate"]),
+                "delta": nc["delta"], "relative": nc["relative_lift"],
+                "significant": nc["significant"], "n": nc["n_cases"], "extras": "",
+            })
     elif name == "compression":
         c = result["retention_contrast"]
         savings = result.get("token_savings", {})
-        claims.append(dict(
-            mechanism="上下文压缩", metric="针保留率",
-            baseline=_fmt_contrast_rate(c["baseline_rate"]),
-            treated=_fmt_contrast_rate(c["treated_rate"]),
-            delta=c["delta"], relative=c["relative_lift"],
-            significant=c["significant"], n=c["n_cases"],
-            extras=f"历史 token 均省 {savings.get('mean_saved_pct', 0):.1f}%",
-        ))
+        claims.append({
+            "mechanism": "上下文压缩", "metric": "针保留率",
+            "baseline": _fmt_contrast_rate(c["baseline_rate"]),
+            "treated": _fmt_contrast_rate(c["treated_rate"]),
+            "delta": c["delta"], "relative": c["relative_lift"],
+            "significant": c["significant"], "n": c["n_cases"],
+            "extras": f"历史 token 均省 {savings.get('mean_saved_pct', 0):.1f}%",
+        })
     elif name == "self_evolution":
         c = result["final_contrast"]
         curve_e = result.get("learning_curve_experimental", [])
         curve_c = result.get("learning_curve_control", [])
-        claims.append(dict(
-            mechanism="反思写回（自进化）", metric="末轮用例通过率",
-            baseline=_fmt_contrast_rate(c["baseline_rate"]),
-            treated=_fmt_contrast_rate(c["treated_rate"]),
-            delta=c["delta"], relative=c["relative_lift"],
-            significant=c["significant"], n=c["n_cases"],
-            extras=(f"学习曲线 实验 {[f'{p:.0%}' for p in curve_e]} vs "
+        claims.append({
+            "mechanism": "反思写回（自进化）", "metric": "末轮用例通过率",
+            "baseline": _fmt_contrast_rate(c["baseline_rate"]),
+            "treated": _fmt_contrast_rate(c["treated_rate"]),
+            "delta": c["delta"], "relative": c["relative_lift"],
+            "significant": c["significant"], "n": c["n_cases"],
+            "extras": (f"学习曲线 实验 {[f'{p:.0%}' for p in curve_e]} vs "
                     f"对照 {[f'{p:.0%}' for p in curve_c]}"),
-        ))
+        })
     elif name == "kv_cache":
-        claims.append(dict(
-            mechanism="KV 前缀冻结", metric="planner 节点前缀命中率",
-            baseline=_fmt_pct(result.get("planner_hit_broken")),
-            treated=_fmt_pct(result.get("planner_hit_frozen")),
-            delta=result.get("planner_hit_delta"), relative=None,
-            significant=None, n=result.get("frozen", {}).get("nodes", {})
+        claims.append({
+            "mechanism": "KV 前缀冻结", "metric": "planner 节点前缀命中率",
+            "baseline": _fmt_pct(result.get("planner_hit_broken")),
+            "treated": _fmt_pct(result.get("planner_hit_frozen")),
+            "delta": result.get("planner_hit_delta"), "relative": None,
+            "significant": None, "n": result.get("frozen", {}).get("nodes", {})
             .get("planner", {}).get("calls", 0),
-            extras="对照=前缀破坏（nonce）；命中来自 cached_tokens 观测",
-        ))
+            "extras": "对照=前缀破坏（nonce）；命中来自 cached_tokens 观测",
+        })
     elif name == "model_ladder":
         for step in result.get("step_contrasts", []):
             c = step["contrast"]
             lc = step.get("level_exact_contrast") or {}
-            claims.append(dict(
-                mechanism=f"{step['from']} → {step['to']}", metric="用例通过率",
-                baseline=_fmt_contrast_rate(c["baseline_rate"]),
-                treated=_fmt_contrast_rate(c["treated_rate"]),
-                delta=c["delta"], relative=c["relative_lift"],
-                significant=c["significant"], n=c["n_cases"],
-                extras=(f"等级准确率 {_fmt_contrast_rate(lc.get('baseline_rate'))}"
+            claims.append({
+                "mechanism": f"{step['from']} → {step['to']}", "metric": "用例通过率",
+                "baseline": _fmt_contrast_rate(c["baseline_rate"]),
+                "treated": _fmt_contrast_rate(c["treated_rate"]),
+                "delta": c["delta"], "relative": c["relative_lift"],
+                "significant": c["significant"], "n": c["n_cases"],
+                "extras": (f"等级准确率 {_fmt_contrast_rate(lc.get('baseline_rate'))}"
                         f" → {_fmt_contrast_rate(lc.get('treated_rate'))}"),
-            ))
+            })
     return claims
 
 
@@ -227,7 +227,7 @@ def _experiment_details(experiments: dict[str, dict]) -> list[str]:
             lines.append("|---|---|---|")
             for i, (e, c) in enumerate(zip(
                     result.get("learning_curve_experimental", []),
-                    result.get("learning_curve_control", [])), 1):
+                    result.get("learning_curve_control", []), strict=False), 1):
                 lines.append(f"| 第 {i} 轮 | {_fmt_pct(e)} | {_fmt_pct(c)} |")
             lines.append("")
             if result.get("note"):

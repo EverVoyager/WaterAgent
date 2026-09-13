@@ -10,30 +10,39 @@
 """
 from evals.cases import EVAL_SEED_BASE, build_cases
 
+# 显式清零：build_cases 的 62 条默认组合是回归基线口径，实验子集
+# 只要自己声明的类型（漏清零会把默认用例混进来，破坏归因与成本控制）
+_ZEROS = {
+    "n_business": 0, "n_chitchat": 0, "n_regulation": 0,
+    "n_web_search": 0, "n_trap": 0,
+    "n_memory": 0, "n_compression": 0, "n_tool_edge": 0,
+}
+
 # 各实验的固定案例组合（change 需同步更新 docs/eval-experiments.md 台账，
 # 并在报告中作为 config 一部分落盘——组合变更视为新实验，旧数字不迁移）
 EXPERIMENT_COMPOSITIONS: dict[str, dict] = {
-    "memory": dict(
-        desc="记忆增益（脚本化注入 vs 无记忆）",
-        n_memory=24, n_compression=0, n_tool_edge=0,
-    ),
-    "compression": dict(
-        desc="压缩等价性（针保留 + token 节省）",
-        n_memory=0, n_compression=12, n_tool_edge=0,
-    ),
-    "self_evolution": dict(
-        desc="反思学习曲线（自进化开/关 × 多轮迭代）",
-        n_business=20, n_memory=8, n_trap=4,
-    ),
-    "kv_cache": dict(
-        desc="KV 前缀冻结命中率（冻结 vs 破坏前缀）",
-        n_business=4,
-    ),
-    "core": dict(  # model_ladder 的底座：62 条核心集，与基线组合一致
-        desc="核心 62 条（训练阶梯与回归门禁共用底座）",
-        n_business=30, n_chitchat=10, n_regulation=8,
-        n_web_search=8, n_trap=6,
-    ),
+    "memory": _ZEROS | {
+        "desc": "记忆增益（脚本化注入 vs 无记忆）",
+        "n_memory": 24,
+    },
+    "compression": _ZEROS | {
+        "desc": "压缩等价性（针保留 + token 节省）",
+        "n_compression": 12,
+    },
+    "self_evolution": _ZEROS | {
+        "desc": "反思学习曲线（自进化开/关 × 多轮迭代）",
+        "n_business": 20, "n_memory": 8, "n_trap": 4,
+    },
+    "kv_cache": _ZEROS | {
+        "desc": "KV 前缀冻结命中率（冻结 vs 破坏前缀）",
+        "n_business": 4,
+    },
+    # model_ladder 的底座：62 条核心集，与基线组合一致
+    "core": _ZEROS | {
+        "desc": "核心 62 条（训练阶梯与回归门禁共用底座）",
+        "n_business": 30, "n_chitchat": 10, "n_regulation": 8,
+        "n_web_search": 8, "n_trap": 6,
+    },
 }
 
 

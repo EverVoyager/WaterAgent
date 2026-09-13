@@ -296,6 +296,7 @@ def _make_memory_cases(n: int, rng: random.Random, base_seed: int) -> list[EvalC
     for i in range(n):
         station = stations[i % len(stations)]
         subtype = ("fact", "fact", "update", "temporal")[i % 4]
+        history: list = []
         if subtype == "fact":
             item, value = _MEMORY_FACTS[station]
             query = _MEMORY_FACT_QUERY_TPL[(i // 4) % len(_MEMORY_FACT_QUERY_TPL)] \
@@ -324,7 +325,6 @@ def _make_memory_cases(n: int, rng: random.Random, base_seed: int) -> list[EvalC
         else:
             fact, query, needles = _MEMORY_TEMPORAL[(i // 4) % len(_MEMORY_TEMPORAL)]
             payload = {"experiences": f"【情景记忆】{fact}"}
-            history = []
             forbidden = ()
         cases.append(EvalCase(
             case_id=f"mem-{i:03d}",
@@ -413,15 +413,25 @@ def _make_long_history(rng: random.Random, station: str, warning_level_value: st
             "研判时我会把这个作为重要背景考虑。"
         )},
     ]
-    # 填充轮：5 个主题 × 2 轮次循环（数值随机但 seed 确定性）
-    for i in range(10):
+    # 填充轮：5 个主题循环 4 遍 = 20 轮，每轮附一段时段快报（数值 seed 确定性），
+    # 总量需超 HISTORY_MAX_TOKENS（coverage.py 断言守门，不足会被 CI 拦下）
+    for i in range(20):
         topic_q, topic_a = _FILLER_TOPICS[i % len(_FILLER_TOPICS)]
+        hour = (8 + i) % 24
+        bulletin = (
+            f"附 {hour:02d} 时段快报：{station}站流量 {q_low + i * 17} 立方米每秒、"
+            f"水位 {310 + (i % 9) * 0.1:.1f} 米、含沙量 {2 + (i % 7)} 千克每立方米；"
+            f"区间面雨量 {(i % 5) * 0.6:.1f} 毫米；水温 {14 + (i % 6)} 度。"
+            f"上游来水趋稳，下游传播正常，闸门开度无调整，机组运行平稳。"
+            f"巡测人员在岗，报汛信道畅通，备用电源切换试验正常。"
+            f"本段数据已同步至值班日志与水情数据库，供后续会商引用。"
+        )
         history.append({"role": "user", "content": topic_q})
         history.append({"role": "assistant", "content": topic_a.format(
             station=station,
             q1=q_low + i * 10,
             q2=q_high + i * 15,
-        )})
+        ) + bulletin})
     return history
 
 

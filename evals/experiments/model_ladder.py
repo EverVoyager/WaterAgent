@@ -60,7 +60,7 @@ def run_model_ladder(models: list[str], cases: list, model_label: str = "") -> d
 
     # 相邻阶梯对照（summarize_contrast 口径：绝对 Δ + 相对 + 显著性）
     step_contrasts = []
-    for lower, upper in zip(rungs, rungs[1:]):
+    for lower, upper in zip(rungs, rungs[1:], strict=False):
         step_contrasts.append({
             "from": lower["model"],
             "to": upper["model"],
