@@ -420,29 +420,26 @@ class TestCompressionExperiment:
     def test_run_compression_experiment_structure(self):
         from evals.experiments import compression as comp_exp
 
-        def fake_run_case(case, model_label=""):
-            # 基线（不压缩）针必在；机制（压缩）丢一条
-            return _record(case.case_id, True, checks={"needle_found": True})
-
         cases = get_experiment_cases("compression")
-        # 机制版丢第一条的针：通过修改 fake 的闭包状态区分两遍
-        state = {"pass_num": 0}
+        # 前半调用=基线遍（全量历史，针必在）；后半=机制遍（压缩丢 comp-000 的针）
+        state = {"calls": 0}
 
-        def fake_run_case2(case, model_label=""):
-            state["pass_num"] += 1
-            found = not (state["pass_num"] > len(cases)) or case.case_id != "comp-000"
+        def fake_run_case(case, model_label=""):
+            state["calls"] += 1
+            is_treated_pass = state["calls"] > len(cases)
+            found = not (is_treated_pass and case.case_id == "comp-000")
             return _record(case.case_id, found,
                            checks={"needle_found": found})
 
-        with patch.object(comp_exp, "run_case", side_effect=fake_run_case2), \
+        with patch.object(comp_exp, "run_case", side_effect=fake_run_case), \
              patch.object(comp_exp, "measure_token_savings",
                           return_value={"tokens_before": 5000,
                                         "tokens_after": 2000, "saved_pct": 60.0}):
             result = comp_exp.run_compression_experiment(cases)
 
         assert result["retention_contrast"]["baseline_rate"]["p"] == 1.0
+        assert result["retention_contrast"]["treated_rate"]["p"] < 1.0
         assert result["token_savings"]["mean_saved_pct"] == 60.0
-        del fake_run_case
 
 
 # ============ 自进化实验（experiments/self_evolution.py） ============

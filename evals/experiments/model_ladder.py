@@ -18,6 +18,8 @@ patch settings.LLM_MODEL 并清 llm 客户端缓存（lru_cache），
 import logging
 
 from evals.experiments.base import summarize_contrast
+from evals.metrics import compute_metrics
+from evals.runner import run_cases
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +36,6 @@ def run_model_ladder(models: list[str], cases: list, model_label: str = "") -> d
 
     from app.core.config import get_settings
     from app.core.llm import get_llm_client
-    from evals.metrics import compute_metrics
-    from evals.runner import run_cases
 
     if len(models) < 2:
         raise ValueError("model_ladder 至少需要 2 个 checkpoint 才有对照意义")
