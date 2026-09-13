@@ -134,9 +134,7 @@ def calibrate(collection: str, n_pairs: int) -> dict | None:
     if pairwise:
         print(f"    两两相似度     {_fmt_pct(pairwise)}")
     if domain_best and off_best:
-        off_sorted = sorted(off_best)
-        off_p95 = _percentile(off_sorted, 0.95)
-        off_max = off_sorted[-1]
+        off_max = max(off_best)
         dom_p05 = _percentile(sorted(domain_best), 0.05)
         # 建议阈值：实测无关漏入最大值 + 0.02 安全边距，上取到 0.05 步长
         # （贴近下界保召回：漏入已有 demote 效果闭环兜底，过严漏召无兜底）

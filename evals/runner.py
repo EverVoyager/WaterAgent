@@ -109,7 +109,10 @@ def _evaluate_case(case, result: dict) -> dict:
             data_results[key] = tc.get("result") or {}
 
     checks: dict[str, bool | None] = {}
-    checks["intent_ok"] = (intent == case.expected_intent)
+    checks["intent_ok"] = (
+        None if case.expected_intent is None
+        else (intent == case.expected_intent)
+    )
     checks["tool_recall"] = (
         (case.required_tools <= called)
         and (not case.required_any or bool(case.required_any & called))
@@ -118,6 +121,17 @@ def _evaluate_case(case, result: dict) -> dict:
         called <= case.allowed_tools
     ) if case.allowed_tools is not None else None
     checks["sequence_valid"] = _check_sequence(tool_sequence)
+
+    # 针检查（memory/compression 用例）：确定性子串断言，不依赖 judge。
+    # needle 必须全出现且 forbidden（知识更新的旧值）不得回显。
+    if case.needle_substrings or case.forbidden_substrings:
+        answer_text = result.get("final_answer", "") or ""
+        checks["needle_found"] = (
+            all(n in answer_text for n in case.needle_substrings)
+            and not any(f in answer_text for f in case.forbidden_substrings)
+        )
+    else:
+        checks["needle_found"] = None
 
     if case.expected_level is not None:
         checks["level_exact"] = (predicted_level == case.expected_level)
@@ -176,6 +190,11 @@ def _case_pass(case_type: str, checks: dict) -> bool:
         "chitchat": ("intent_ok", "tool_precision"),
         "regulation": ("intent_ok", "tool_recall", "tool_precision"),
         "web_search": ("intent_ok", "tool_recall", "tool_precision", "citation_ok"),
+        # 记忆/压缩：判定只看针（意图两类皆可、工具不限制）；
+        # 工具边界：意图不适用，看 precision（不得乱调）与 recall（该调必调）
+        "memory": ("needle_found",),
+        "compression": ("needle_found",),
+        "tool_edge": ("intent_ok", "tool_recall", "tool_precision"),
     }
     # None = 检查项对该用例不适用，不计入；只有显式 False 才判失败
     return all(checks.get(k) is not False for k in required_by_type[case_type])
@@ -199,7 +218,7 @@ def run_case(case, model_label: str = "") -> dict:
     try:
         with case_env(case):
             t0 = time.perf_counter()
-            result = run_graph_agent(case.query, history=[])
+            result = run_graph_agent(case.query, history=list(case.history))
             record["latency_s"] = round(time.perf_counter() - t0, 2)
         record.update(_evaluate_case(case, result))
         record["final_answer"] = result.get("final_answer", "")
@@ -223,12 +242,13 @@ def run_case(case, model_label: str = "") -> dict:
         record["checks"] = {
             "level_exact": None if case.expected_level is None else False,
             "level_adjacent": None if case.expected_level is None else False,
-            "intent_ok": False,
+            "intent_ok": None if case.expected_intent is None else False,
             "tool_recall": None if not (case.required_tools or case.required_any) else False,
             "tool_precision": None if case.allowed_tools is None else False,
             "sequence_valid": None,
             "citation_ok": None if case.case_type != "web_search" else False,
             "trap_resisted": None if case.case_type != "trap" else False,
+            "needle_found": None if not (case.needle_substrings or case.forbidden_substrings) else False,
         }
         record["passed"] = False
         record["env_mismatch"] = ""

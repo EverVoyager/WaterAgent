@@ -107,8 +107,9 @@ _POOL = [
 
 
 def seed() -> int:
-    from agent.rag.embedding import embed_texts
     from qdrant_client.http import models as qmodels
+
+    from agent.rag.embedding import embed_texts
 
     client = get_qdrant_client()
     total = 0

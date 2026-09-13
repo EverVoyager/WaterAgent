@@ -10,6 +10,13 @@
     # 带 LLM Judge + 稳定性 pass^3 + 记忆消融
     python evals/run_eval.py --judge --pass-k --ablation 20
 
+    # 量化实验（详见 docs/eval-experiments.md）
+    python evals/run_eval.py --experiment memory          # 记忆增益
+    python evals/run_eval.py --experiment compression     # 压缩等价性
+    python evals/run_eval.py --experiment self-evolution  # 反思学习曲线
+    python evals/run_eval.py --experiment kv-cache        # KV 前缀冻结
+    python evals/run_eval.py --models base,sft,dpo,grpo   # 训练阶梯
+
     # 更新基线（评审通过后入库）
     python evals/run_eval.py --update-baseline
 
@@ -37,6 +44,7 @@ from dotenv import load_dotenv  # noqa: E402
 load_dotenv(Path(_BACKEND_ROOT) / ".env")
 
 from evals.ablation import run_memory_ablation  # noqa: E402
+from evals.case_sets import EXPERIMENT_COMPOSITIONS, get_experiment_cases  # noqa: E402
 from evals.cases import EVAL_SEED_BASE, build_cases  # noqa: E402
 from evals.judge import aggregate_judge, judge_record  # noqa: E402
 from evals.metrics import compute_metrics, compute_pass_power_k  # noqa: E402
@@ -51,6 +59,8 @@ HISTORY_DIR = EVALS_DIR / "history"
 _PASS_K_SUBSET = 20  # business 子集抽样规模（pass^k 重复跑成本 k 倍，控制预算）
 _PASS_K = 3
 
+_EXPERIMENT_CHOICES = ("memory", "compression", "self-evolution", "kv-cache")
+
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="WaterAgents 系统级评估")
@@ -59,6 +69,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--n-regulation", type=int, default=8)
     parser.add_argument("--n-web-search", type=int, default=8)
     parser.add_argument("--n-trap", type=int, default=6)
+    parser.add_argument("--n-memory", type=int, default=0,
+                        help="记忆召回用例数（默认 0：保持基线组合不变）")
+    parser.add_argument("--n-compression", type=int, default=0,
+                        help="压缩等价性用例数（默认 0）")
+    parser.add_argument("--n-tool-edge", type=int, default=0,
+                        help="工具边界用例数（默认 0）")
     parser.add_argument("--limit", type=int, default=0,
                         help="截断用例总数（冒烟用），0=不截断")
     parser.add_argument("--seed", type=int, default=EVAL_SEED_BASE)
@@ -70,6 +86,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help=f"business 子集 {_PASS_K_SUBSET} 条重复 {_PASS_K} 次，算 pass^{_PASS_K}")
     parser.add_argument("--ablation", type=int, default=0, metavar="N",
                         help="记忆消融：N 条 business 用例有/无记忆注入对比")
+    parser.add_argument("--experiment", choices=_EXPERIMENT_CHOICES, default="",
+                        help="量化实验（案例组合固定于 case_sets.EXPERIMENT_COMPOSITIONS，"
+                             "与 --n-* 互斥：实验模式忽略计数参数）")
+    parser.add_argument("--models", default="",
+                        help="训练阶梯：逗号分隔 checkpoint 列表"
+                             "（如 base,sft,dpo,grpo，需同端点可切模型名）")
+    parser.add_argument("--iterations", type=int, default=3,
+                        help="self-evolution 实验的迭代轮数（默认 3）")
     parser.add_argument("--model-label", default="",
                         help="模型标签（默认读 settings.LLM_MODEL），多模型对比用")
     parser.add_argument("--update-baseline", action="store_true",
@@ -115,9 +139,126 @@ def _run_pass_k(cases: list, model_label: str) -> dict:
     return compute_pass_power_k(records_by_repeat, k=_PASS_K)
 
 
+def _reproduce_cmd(args: argparse.Namespace) -> str:
+    """本次运行的复现命令（报告嵌引：数字来自哪条命令，一条可复现）。"""
+    parts = ["python evals/run_eval.py"]
+    if args.experiment:
+        parts.append(f"--experiment {args.experiment}")
+    if args.models:
+        parts.append(f"--models {args.models}")
+    if args.iterations != 3:
+        parts.append(f"--iterations {args.iterations}")
+    if args.seed != EVAL_SEED_BASE:
+        parts.append(f"--seed {args.seed}")
+    if args.model_label:
+        parts.append(f"--model-label {args.model_label}")
+    return " ".join(parts)
+
+
+def _run_experiment_flow(args: argparse.Namespace, model_label: str) -> int:
+    """量化实验分支：固定案例组合 → 实验 → 报告（含量化声明表）。"""
+    experiment = args.experiment
+    if args.models:
+        experiment = "model_ladder"
+    cases = get_experiment_cases(
+        "core" if experiment == "model_ladder" else experiment.replace("-", "_"),
+        seed=args.seed,
+    )
+    # case_sets 键名对齐（CLI 连字符 → 模块下划线）
+    print(f"[eval] 实验: {experiment} ｜ 用例: {len(cases)} 条 ｜ "
+          f"组合: {EXPERIMENT_COMPOSITIONS.get(experiment.replace('-', '_'), {}).get('desc', 'core')}")
+
+    experiments: dict[str, dict] = {}
+    if experiment == "memory":
+        from evals.experiments.memory import run_memory_experiment
+        experiments["memory"] = run_memory_experiment(cases, model_label=model_label)
+    elif experiment == "compression":
+        from evals.experiments.compression import run_compression_experiment
+        experiments["compression"] = run_compression_experiment(cases, model_label=model_label)
+    elif experiment == "self-evolution":
+        from evals.experiments.self_evolution import run_self_evolution_experiment
+        experiments["self_evolution"] = run_self_evolution_experiment(
+            cases, iterations=args.iterations, model_label=model_label,
+        )
+    elif experiment == "kv-cache":
+        from evals.experiments.kv_cache import run_kv_cache_experiment
+        experiments["kv_cache"] = run_kv_cache_experiment(model_label=model_label)
+    elif experiment == "model_ladder":
+        from evals.experiments.model_ladder import run_model_ladder
+        models = [m.strip() for m in args.models.split(",") if m.strip()]
+        experiments["model_ladder"] = run_model_ladder(
+            models, cases, model_label=model_label,
+        )
+
+    # 报告：取首个实验的主 records 出总体段（实验结论看声明表与明细段）
+    primary_records: list[dict] = []
+    for result in experiments.values():
+        for key in ("records_with", "records_treated", "records_experimental_last"):
+            if result.get(key):
+                primary_records = result[key]
+                break
+        if not primary_records and result.get("rungs"):
+            primary_records = result["rungs"][-1]["records"]
+        if primary_records:
+            break
+    metrics = compute_metrics(primary_records) if primary_records else {
+        "n_cases": 0, "n_errors": 0, "latency": {"p50": 0.0, "p95": 0.0, "mean": 0.0},
+    }
+
+    config = {
+        "model_label": model_label,
+        "seed": args.seed,
+        "experiment": experiment,
+        "reproduce_cmd": _reproduce_cmd(args),
+        "iterations": args.iterations if experiment == "self-evolution" else None,
+        "models": args.models or None,
+        "judge": False,
+    }
+
+    print("[eval] 量化声明：")
+    from evals.report import render_claims_section
+    for line in render_claims_section(experiments):
+        if line.startswith("|") and not line.startswith("|---"):
+            print("  " + line)
+
+    HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_path = Path(args.report) if args.report else (
+        HISTORY_DIR / f"exp_{experiment}_{timestamp}.md"
+    )
+    md = render_report(primary_records, metrics, config, experiments=experiments)
+    report_path.write_text(md, encoding="utf-8")
+
+    # 实验原始结果落 JSON（records 明细体积大，剥离后存声明与对照结构）
+    slim = {}
+    for name, result in experiments.items():
+        slim_result = {
+            k: v for k, v in result.items()
+            if not k.startswith("records") and k not in ("rungs",)
+        }
+        if result.get("rungs"):
+            slim_result["rungs"] = [
+                {k: v for k, v in rung.items() if k != "records"}
+                for rung in result["rungs"]
+            ]
+        slim[name] = slim_result
+    (HISTORY_DIR / f"exp_{experiment}_{timestamp}.json").write_text(
+        json.dumps({"config": config, "experiments": slim},
+                   ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
+    print(f"[eval] 报告: {report_path}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     model_label = _model_label(args.model_label)
+
+    # 量化实验分支（固定案例组合，不走全量流程与回归门禁）
+    if args.experiment or args.models:
+        return _run_experiment_flow(args, model_label)
+
     print(f"[eval] 模型: {model_label} ｜ judge: {'on' if args.judge else 'off'}")
 
     # 1. 数据集（种子隔离断言在 build_cases 内）
@@ -127,6 +268,9 @@ def main(argv: list[str] | None = None) -> int:
         n_regulation=args.n_regulation,
         n_web_search=args.n_web_search,
         n_trap=args.n_trap,
+        n_memory=args.n_memory,
+        n_compression=args.n_compression,
+        n_tool_edge=args.n_tool_edge,
         seed=args.seed,
     )
     if args.limit > 0:
@@ -144,6 +288,9 @@ def main(argv: list[str] | None = None) -> int:
         "n_regulation": args.n_regulation,
         "n_web_search": args.n_web_search,
         "n_trap": args.n_trap,
+        "n_memory": args.n_memory,
+        "n_compression": args.n_compression,
+        "n_tool_edge": args.n_tool_edge,
         "limit": args.limit,
         "judge": args.judge,
     }
@@ -243,7 +390,8 @@ def _baseline_composition_diff(baseline: dict, config: dict) -> str:
     base_cfg = baseline.get("config", {})
     diffs = []
     for key in ("n_business", "n_chitchat", "n_regulation", "n_web_search",
-                "n_trap", "limit", "model_label"):
+                "n_trap", "n_memory", "n_compression", "n_tool_edge",
+                "limit", "model_label"):
         if base_cfg.get(key) != config.get(key):
             diffs.append(f"{key}: {base_cfg.get(key)}→{config.get(key)}")
     return ", ".join(diffs)

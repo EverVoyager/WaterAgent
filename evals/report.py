@@ -16,6 +16,8 @@ _CAP_NAMES = {
     "level_decision": "等级判定",
     "citation": "引用溯源",
     "misdirection_resistance": "抗误导",
+    "memory_recall": "记忆召回",
+    "needle_retention": "针保留（压缩后）",
 }
 _TYPE_NAMES = {
     "business": "业务研判",
@@ -23,6 +25,9 @@ _TYPE_NAMES = {
     "regulation": "法规问答",
     "web_search": "联网检索",
     "trap": "陷阱任务",
+    "memory": "记忆召回",
+    "compression": "压缩等价性",
+    "tool_edge": "工具边界",
 }
 _METRIC_NAMES = {
     "case_pass_rate": "用例通过率",
@@ -34,6 +39,7 @@ _METRIC_NAMES = {
     "sequence_valid": "工具顺序合法率",
     "citation_ok": "引用可溯源率",
     "trap_resisted": "陷阱抵抗率",
+    "needle_found": "针保留率（答案含关键事实）",
 }
 
 
@@ -82,6 +88,179 @@ def _rung(level: str) -> str:
     return {"I": "Ⅰ级", "II": "Ⅱ级", "III": "Ⅲ级", "IV": "Ⅳ级"}.get(level, level or "—")
 
 
+# ====== 量化声明表（experiments 结果 → 可对外引用的声明行） ======
+
+def _fmt_contrast_rate(entry: dict | None) -> str:
+    return _fmt_rate(entry) if entry else "—"
+
+
+def _fmt_pct(v: float | None) -> str:
+    return "—" if v is None else f"{v * 100:.1f}%"
+
+
+def experiment_claims(name: str, result: dict) -> list[dict]:
+    """把单个实验结果归一为声明行（量化声明表的数据来源）。
+
+    每行字段：mechanism/metric/baseline/treated/delta/relative/significant/n/extras。
+    方向约定：treated=机制开启版，baseline=对照版；compression 方向特殊
+    （机制=压缩，声明的是保留率与 token 节省的权衡），单独措辞。
+    """
+    claims: list[dict] = []
+    if name == "memory":
+        c = result["contrast"]
+        claims.append(dict(
+            mechanism="记忆注入（脚本化）", metric="用例通过率",
+            baseline=_fmt_contrast_rate(c["baseline_rate"]),
+            treated=_fmt_contrast_rate(c["treated_rate"]),
+            delta=c["delta"], relative=c["relative_lift"],
+            significant=c["significant"], n=c["n_cases"],
+            extras="子类见明细",
+        ))
+        nc = result.get("needle_contrast")
+        if nc:
+            claims.append(dict(
+                mechanism="记忆注入（脚本化）", metric="针召回率（答案含记忆事实）",
+                baseline=_fmt_contrast_rate(nc["baseline_rate"]),
+                treated=_fmt_contrast_rate(nc["treated_rate"]),
+                delta=nc["delta"], relative=nc["relative_lift"],
+                significant=nc["significant"], n=nc["n_cases"], extras="",
+            ))
+    elif name == "compression":
+        c = result["retention_contrast"]
+        savings = result.get("token_savings", {})
+        claims.append(dict(
+            mechanism="上下文压缩", metric="针保留率",
+            baseline=_fmt_contrast_rate(c["baseline_rate"]),
+            treated=_fmt_contrast_rate(c["treated_rate"]),
+            delta=c["delta"], relative=c["relative_lift"],
+            significant=c["significant"], n=c["n_cases"],
+            extras=f"历史 token 均省 {savings.get('mean_saved_pct', 0):.1f}%",
+        ))
+    elif name == "self_evolution":
+        c = result["final_contrast"]
+        curve_e = result.get("learning_curve_experimental", [])
+        curve_c = result.get("learning_curve_control", [])
+        claims.append(dict(
+            mechanism="反思写回（自进化）", metric="末轮用例通过率",
+            baseline=_fmt_contrast_rate(c["baseline_rate"]),
+            treated=_fmt_contrast_rate(c["treated_rate"]),
+            delta=c["delta"], relative=c["relative_lift"],
+            significant=c["significant"], n=c["n_cases"],
+            extras=(f"学习曲线 实验 {[f'{p:.0%}' for p in curve_e]} vs "
+                    f"对照 {[f'{p:.0%}' for p in curve_c]}"),
+        ))
+    elif name == "kv_cache":
+        claims.append(dict(
+            mechanism="KV 前缀冻结", metric="planner 节点前缀命中率",
+            baseline=_fmt_pct(result.get("planner_hit_broken")),
+            treated=_fmt_pct(result.get("planner_hit_frozen")),
+            delta=result.get("planner_hit_delta"), relative=None,
+            significant=None, n=result.get("frozen", {}).get("nodes", {})
+            .get("planner", {}).get("calls", 0),
+            extras="对照=前缀破坏（nonce）；命中来自 cached_tokens 观测",
+        ))
+    elif name == "model_ladder":
+        for step in result.get("step_contrasts", []):
+            c = step["contrast"]
+            lc = step.get("level_exact_contrast") or {}
+            claims.append(dict(
+                mechanism=f"{step['from']} → {step['to']}", metric="用例通过率",
+                baseline=_fmt_contrast_rate(c["baseline_rate"]),
+                treated=_fmt_contrast_rate(c["treated_rate"]),
+                delta=c["delta"], relative=c["relative_lift"],
+                significant=c["significant"], n=c["n_cases"],
+                extras=(f"等级准确率 {_fmt_contrast_rate(lc.get('baseline_rate'))}"
+                        f" → {_fmt_contrast_rate(lc.get('treated_rate'))}"),
+            ))
+    return claims
+
+
+def render_claims_section(experiments: dict[str, dict]) -> list[str]:
+    """量化声明表：所有实验的"基线 → 机制"对照（书/论文可直接引用的格式）。"""
+    lines: list[str] = []
+    rows: list[dict] = []
+    for name, result in experiments.items():
+        rows.extend(experiment_claims(name, result))
+    if not rows:
+        return lines
+    lines.append("## 量化声明表（基线 → 机制）")
+    lines.append("")
+    lines.append("| 机制 | 指标 | 基线 | +机制 | Δ | 相对提升 | 显著性 | n | 副指标 |")
+    lines.append("|---|---|---|---|---|---|---|---|---|")
+    for r in rows:
+        delta = "—" if r["delta"] is None else f"{r['delta'] * 100:+.1f} pp"
+        relative = "—" if r["relative"] is None else f"{r['relative'] * 100:+.1f}%"
+        if r["significant"] is None:
+            sig = "—"
+        else:
+            sig = "显著" if r["significant"] else "未超噪声带宽"
+        lines.append(
+            f"| {r['mechanism']} | {r['metric']} | {r['baseline']} | {r['treated']} "
+            f"| {delta} | {relative} | {sig} | {r['n']} | {r['extras']} |"
+        )
+    lines.append("")
+    return lines
+
+
+def _experiment_details(experiments: dict[str, dict]) -> list[str]:
+    """实验专属明细段（学习曲线/KV 节点表/阶梯表/记忆子类）。"""
+    lines: list[str] = []
+    for name, result in experiments.items():
+        if name == "memory" and result.get("by_subtype"):
+            lines.append("### 记忆实验分子类")
+            lines.append("")
+            lines.append("| 子类 | 基线 | +记忆 | Δ | n |")
+            lines.append("|---|---|---|---|---|")
+            subtype_names = {"fact": "跨会话事实", "update": "知识更新", "temporal": "时间推理"}
+            for subtype, c in result["by_subtype"].items():
+                delta = "—" if c["delta"] is None else f"{c['delta'] * 100:+.1f} pp"
+                lines.append(
+                    f"| {subtype_names.get(subtype, subtype)} "
+                    f"| {_fmt_contrast_rate(c['baseline_rate'])} "
+                    f"| {_fmt_contrast_rate(c['treated_rate'])} | {delta} | {c['n_cases']} |"
+                )
+            lines.append("")
+        elif name == "self_evolution":
+            lines.append("### 自进化学习曲线（Reflexion 式）")
+            lines.append("")
+            lines.append("| 轮次 | 实验组（开） | 对照组（关） |")
+            lines.append("|---|---|---|")
+            for i, (e, c) in enumerate(zip(
+                    result.get("learning_curve_experimental", []),
+                    result.get("learning_curve_control", [])), 1):
+                lines.append(f"| 第 {i} 轮 | {_fmt_pct(e)} | {_fmt_pct(c)} |")
+            lines.append("")
+            if result.get("note"):
+                lines.append(f"> {result['note']}")
+                lines.append("")
+        elif name == "kv_cache":
+            lines.append("### KV Cache 分节点命中率（冻结 vs 破坏）")
+            lines.append("")
+            lines.append("| 节点 | 冻结命中率 | 破坏命中率 | prompt tokens（冻结） |")
+            lines.append("|---|---|---|---|")
+            for node, s in result.get("frozen", {}).get("nodes", {}).items():
+                broken_rate = result.get("broken", {}).get("nodes", {}).get(node, {})
+                lines.append(
+                    f"| {node} | {_fmt_pct(s['hit_rate'])} "
+                    f"| {_fmt_pct(broken_rate.get('hit_rate'))} | {s['prompt_tokens']} |"
+                )
+            lines.append("")
+        elif name == "model_ladder":
+            lines.append("### 训练阶梯逐级明细")
+            lines.append("")
+            lines.append("| checkpoint | 用例通过率 | 等级准确率 | 工具召回 |")
+            lines.append("|---|---|---|---|")
+            for rung in result.get("rungs", []):
+                lines.append(
+                    f"| {rung['model']} | {_fmt_contrast_rate(rung.get('case_pass_rate'))} "
+                    f"| {_fmt_contrast_rate(rung.get('level_exact'))} "
+                    f"| {_fmt_contrast_rate(rung.get('tool_recall'))} |"
+                )
+            lines.append("")
+    return lines
+
+
+
 def render_report(
     records: list[dict],
     metrics: dict,
@@ -90,6 +269,7 @@ def render_report(
     ablation: dict | None = None,
     judge_agg: dict | None = None,
     regression_lines: list[str] | None = None,
+    experiments: dict[str, dict] | None = None,
 ) -> str:
     """渲染 Markdown 评估报告。"""
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -105,6 +285,8 @@ def render_report(
     ap(f"- LLM Judge：{'开启' if judge_agg else '关闭（--no-judge，仅确定性指标）'}")
     ap(f"- 平均轮次：{metrics.get('rounds_mean', 0)} ｜ "
        f"延迟 p50/p95：{metrics['latency']['p50']}s / {metrics['latency']['p95']}s")
+    if config.get("experiment"):
+        ap(f"- 实验：`{config['experiment']}` ｜ 复现：`{config.get('reproduce_cmd', '—')}`")
     ap("")
     ap(f"> {noise_band_note()}")
     ap("")
@@ -116,7 +298,7 @@ def render_report(
     ap("|---|---|")
     for key in ("case_pass_rate", "level_exact", "level_adjacent", "intent_ok",
                 "tool_recall", "tool_precision", "sequence_valid",
-                "citation_ok", "trap_resisted"):
+                "citation_ok", "trap_resisted", "needle_found"):
         ap(_fmt_metric_row(metrics, key))
     ap("")
 
@@ -186,6 +368,15 @@ def render_report(
         if ablation.get("flipped_to_fail"):
             ap(f"- 记忆反而致败的 case：{', '.join(ablation['flipped_to_fail'])}")
         ap("")
+
+    # 量化实验（声明表 + 专属明细）
+    if experiments:
+        lines.extend(render_claims_section(experiments))
+        details = _experiment_details(experiments)
+        if details:
+            ap("## 实验明细")
+            ap("")
+            lines.extend(details)
 
     # 回归
     if regression_lines:

@@ -36,7 +36,10 @@ TRAIN_SEED_RANGES: tuple[tuple[int, int], ...] = (
     (0, 100_000), (100_000, 200_000), (200_000, 300_000),
 )
 
-CASE_TYPES = ("business", "chitchat", "regulation", "web_search", "trap")
+CASE_TYPES = (
+    "business", "chitchat", "regulation", "web_search", "trap",
+    "memory", "compression", "tool_edge",
+)
 
 # 能力标签体系（报告按此出"任务 × 能力"矩阵）
 CAP_LEVEL = "level_decision"        # 等级判定
@@ -44,6 +47,8 @@ CAP_TOOLS = "tool_selection"        # 工具选择
 CAP_CITATION = "citation"           # 引用溯源
 CAP_INTENT = "intent"               # 意图识别
 CAP_RESIST = "misdirection_resistance"  # 抗误导（陷阱任务专属）
+CAP_MEMORY = "memory_recall"        # 记忆召回（跨会话事实/知识更新/时间推理）
+CAP_NEEDLE = "needle_retention"     # 长上下文针保留（压缩后早轮信息不丢）
 
 # 工具集合分组（期望工具集定义用）
 _DATA_TOOLS = frozenset({"get_weather", "get_hydrology", "predict_runoff"})
@@ -63,6 +68,12 @@ class EvalCase:
         allowed_tools:  允许出现的工具集合（None=不限制；出现集合外的工具记 precision 失败）
         expected_level: 期望预警等级（None=不检查等级）
         claimed_level:  陷阱任务中用户口头声称的等级（仅 trap 用例有）
+        expected_intent: 期望意图（None=不检查：tool_edge 边界查询两类意图皆可）
+        history: 预置会话历史（memory/compression 用例：多轮脚本，压缩用例须超预算）
+        memory_payload: 脚本化记忆注入内容（key ∈ longterm/experiences/semantic，
+            模拟已积累的记忆库；experiments/memory.py 的 patch 消费）
+        needle_substrings: 答案必须包含的子串（针检查：确定性，不依赖 judge）
+        forbidden_substrings: 答案不得包含的子串（知识更新用例：旧值不得回显）
         capabilities:   能力标签列表
     """
     case_id: str
@@ -74,8 +85,12 @@ class EvalCase:
     required_any: frozenset = frozenset()
     allowed_tools: frozenset | None = None
     expected_level: str | None = None
-    expected_intent: str = "agent_task"
+    expected_intent: str | None = "agent_task"
     claimed_level: str | None = None
+    history: list = field(default_factory=list)
+    memory_payload: dict = field(default_factory=dict)
+    needle_substrings: tuple = ()
+    forbidden_substrings: tuple = ()
     capabilities: tuple = ()
 
     def to_env(self) -> dict:
@@ -225,15 +240,313 @@ def _make_trap_cases(n: int, rng: random.Random, base_seed: int) -> list[EvalCas
     return cases
 
 
+# ====== 记忆召回用例（LongMemEval 式：脚本化记忆 + 事后提问，experiments/memory.py 消费） ======
+
+# 站点档案事实（fact 子类）：注入长期记忆，问答案必须含精确数值
+_MEMORY_FACTS = {
+    "吴堡": ("警戒水位", "638.26"),
+    "龙门": ("警戒流量", "10500"),
+    "府谷": ("保证水位", "812.45"),
+}
+_MEMORY_FACT_QUERY_TPL = [
+    "结合你记住的站点档案回答：{station}站的{item}是多少？不用查工具。",
+    "{station}站的{item}是多少？请基于你记住的历史信息回答。",
+    "你之前记过{station}站的{item}吧？说给我听听。",
+    "不用查实时数据，凭记忆说下{station}站的{item}。",
+]
+
+# 知识更新（update 子类）：语义记忆为旧值，近期会话已更正——答案用新值、不得回显旧值
+_MEMORY_UPDATE = {
+    "吴堡": ("警戒流量", "6200", "6500"),
+    "龙门": ("汛限水位", "382.10", "385.50"),
+    "府谷": ("警戒流量", "5500", "5800"),
+}
+_MEMORY_UPDATE_QUERY_TPL = [
+    "结合我们刚才的更正，{station}站的{item}现在是多少？",
+    "{station}站的{item}以哪个数为准？旧值还是更正值？",
+]
+
+# 时间推理（temporal 子类）：情景记忆中的时间事件，问答需还原事件结论
+_MEMORY_TEMPORAL = [
+    ("丁家沟雨量站 9 月 2 日完成校准，此前雨量数据系统性偏低约 5%。",
+     "丁家沟站 9 月 1 日之前的雨量数据还能直接用吗？", ("偏低",)),
+    ("上游 8 月 28 日调度会决议：红旗沟水库即日起按 120 立方米每秒预泄腾库。",
+     "红旗沟水库现在应该按多大流量预泄？", ("120",)),
+    ("前日报汛电话修正：裴沟站 3 日 8 时流量由 2100 修正为 2450 立方米每秒。",
+     "裴沟站 3 日 8 时的流量最终以哪个数为准？", ("2450",)),
+    ("白乙沟水文站 9 月起迁址至下游 300 米新断面，新旧断面水位不作换算。",
+     "白乙沟站的水位数据和迁址前怎么衔接？", ("不作换算",)),
+    ("8 月 30 日测流缆道检修，当晚白乙沟流量缺测，已用插补值代替。",
+     "8 月 30 日晚白乙沟的流量数据是实测的吗？", ("插补",)),
+    ("9 月 1 日起全河段报汛频次由每小时 1 次加密为每小时 2 次。",
+     "现在的报汛频次是多少？和 9 月前比有什么变化？", ("加密",)),
+]
+
+
+def _make_memory_cases(n: int, rng: random.Random, base_seed: int) -> list[EvalCase]:
+    """记忆召回用例：fact/update/temporal 三子类轮换。
+
+    记忆内容通过 memory_payload 脚本化注入（experiments/memory.py 把三个
+    注入函数替换为 payload 读取）——受控内容优于真实记忆库的噪声，
+    归因到"Harness+模型能否用好记忆内容"，库填充质量由单测另行覆盖。
+    """
+    stations = list(STATIONS)
+    cases: list[EvalCase] = []
+    # 子类配比 fact:update:temporal = 2:1:1
+    for i in range(n):
+        station = stations[i % len(stations)]
+        subtype = ("fact", "fact", "update", "temporal")[i % 4]
+        if subtype == "fact":
+            item, value = _MEMORY_FACTS[station]
+            query = _MEMORY_FACT_QUERY_TPL[(i // 4) % len(_MEMORY_FACT_QUERY_TPL)] \
+                .format(station=station, item=item)
+            payload = {"longterm": (
+                f"【长期记忆·站点档案】{station}站{item} {value}"
+                f"（2024 年汛期核定，值班交接时登记）。"
+            )}
+            needles, forbidden = (value,), ()
+        elif subtype == "update":
+            item, old, new = _MEMORY_UPDATE[station]
+            query = _MEMORY_UPDATE_QUERY_TPL[(i // 4) % len(_MEMORY_UPDATE_QUERY_TPL)] \
+                .format(station=station, item=item)
+            payload = {"semantic": (
+                f"【语义记忆】{station}站{item} {old}（2024 年核定，可能过期）。"
+            )}
+            history = [
+                {"role": "user", "content": (
+                    f"更正：经 2025 年复核，{station}站{item}由 {old} 调整为 {new}，以此为准。"
+                )},
+                {"role": "assistant", "content": (
+                    f"已了解，{station}站{item}以更正值 {new} 为准。"
+                )},
+            ]
+            needles, forbidden = (new,), (old,)
+        else:
+            fact, query, needles = _MEMORY_TEMPORAL[(i // 4) % len(_MEMORY_TEMPORAL)]
+            payload = {"experiences": f"【情景记忆】{fact}"}
+            history = []
+            forbidden = ()
+        cases.append(EvalCase(
+            case_id=f"mem-{i:03d}",
+            case_type="memory",
+            query=query,
+            seed=base_seed + i,
+            history=history,
+            memory_payload=payload,
+            needle_substrings=needles,
+            forbidden_substrings=forbidden,
+            expected_intent=None,  # 记忆问答两类意图皆可，判定只看针
+            capabilities=(CAP_MEMORY,),
+        ))
+    return cases
+
+
+# ====== 压缩等价性用例（LLMLingua 式：长历史埋针 + 末轮提问，experiments/compression.py 消费） ======
+
+_COMPRESSION_NEEDLES = {
+    "吴堡": "638.26",
+    "龙门": "385.90",
+    "府谷": "812.45",
+}
+_COMPRESSION_QUERY_TPL = [
+    "回顾我们前面聊过的内容：{station}站的警戒水位是多少？前期流域累积降雨量达到多少毫米？",
+    "只根据我们之前的对话回答：{station}站警戒水位和入汛以来流域累积降雨量分别是多少？",
+    "刚才对话里提到过{station}站的警戒水位和累积降雨量，分别是多少来着？",
+    "不用查工具，凭我们前面的对话说：{station}站警戒水位多少？流域前期累积雨量多少？",
+]
+
+# 填充轮语料池（与针无关的值班问答，撑长历史至 token 预算之上）
+_FILLER_TOPICS = [
+    ("今天的值班安排有什么要注意的？",
+     "今日值班重点关注三项：一是{station}站流量变幅，若小时涨幅超过 5% 需立即上报；"
+     "二是上游区间降雨预报的落区调整，气象台 08 时会商已把强降雨落区向南修正约 30 公里，"
+     "涉及我们河段的量级可能下调；三是撤离路线的临时管制信息，交警队在沿河三个路口"
+     "设置了管制点，如启动响应需要协调放行抢险车辆。另请注意今日 14 时有上级汛情调度会，"
+     "需要提前准备昨日水情简报和近三日雨水情对比材料，会上可能问到区间来水占比问题。"),
+    ("最近几天的水情总体怎么样？",
+     "近三日水情总体平稳中略有抬升。{station}站流量从 {q1} 立方米每秒缓涨至 {q2} 立方米每秒，"
+     "水位相应抬升约 0.3 米，均在警戒值以下。支流来水占比约四成，较前期略有增加，"
+     "主要是上游局地阵性降雨贡献。河道演进方面，洪水传播时间与往常一致，"
+     "未出现漫滩或偎水情况。未来 24 小时如无新的强降雨，预计维持缓变态势；"
+     "若上游出现 50 毫米以上量级降雨，需要关注断面起涨时间并做好加密测报准备。"),
+    ("上游水库现在是什么状态？",
+     "上游万家寨水库当前水位接近汛限，出库按调度规程控制在 {q1} 立方米每秒附近，"
+     "入库流量与出库基本持平，库容处于安全区间。按现行调度方式，未来三日若无台风外围影响，"
+     "水库将以发电流量为基础平稳运行。需要注意的是水库泄流时段的传播到本河段时间约 20 小时，"
+     "如遇调度调整需要提前一天通知沿河做好防范。另外上游还有两座中型水库在拦洪运用，"
+     "其泄流汇入后对本断面洪峰有一定削峰作用，具体数值模型组还在滚动复核。"),
+    ("防汛物资准备得如何了？",
+     "按照年度度汛方案，重点物资已完成了第二轮核查补充。编织袋、铅丝笼、救生衣等"
+     "常规物资在三个中心仓库均有足额储备，抢险车辆和挖掘机等机械已落实社会化储备协议，"
+     "联系人清单已更新。砂石料场落实了两处，均在 30 分钟运输半径内。存在的短板是"
+     "夜间照明设备数量偏紧，已紧急采购一批移动灯塔，预计下周到货。各乡镇的应急"
+     "队伍花名册已核实，共登记抢险队员六百余人，关键岗位实行 24 小时双人值守。"),
+    ("天气展望怎么说？",
+     "气象部门最新预报显示，未来三天本区域以多云天气为主，局地有分散性阵雨，"
+     "累计雨量不大。中期预报看，周末前后可能有一次较明显的降雨过程，落区和量级"
+     "还存在分歧，欧洲和中央台两家模式预报的累计雨量相差接近一倍，需要滚动关注。"
+     "水汽条件方面，副高边缘的西南气流维持，低层湿度较好，一旦有扰动触发，"
+     "局地短时强降雨的可能性不能排除。建议重点关注周末过程与上游来水的叠加影响，"
+     "提前做好会商和测报加密的预案。"),
+]
+
+
+def _make_long_history(rng: random.Random, station: str, warning_level_value: str) -> list:
+    """构造超 token 预算的长会话历史（针埋在早轮，撑长用值班问答填充）。"""
+    q_low, q_high = 800 + rng.randrange(400), 1400 + rng.randrange(600)
+    history: list[dict] = [
+        {"role": "user", "content": (
+            f"先记个底：{station}站的警戒水位是 {warning_level_value} 米，今天先聊聊总体形势。"
+        )},
+        {"role": "assistant", "content": (
+            f"好的，已记录：{station}站警戒水位 {warning_level_value} 米。"
+            f"下面结合当前雨水情给你一个总体判断：目前河道流量处于平稳段，"
+            f"水位距警戒值还有一定余量，但前期土壤含水量偏高，一旦出现强降雨，"
+            f"产流会明显加快，需要提前关注。"
+        )},
+        {"role": "user", "content": (
+            "另外，今年入汛以来前期流域累积降雨量已达 127.4 毫米，比常年同期偏多。"
+        )},
+        {"role": "assistant", "content": (
+            "了解，前期流域累积降雨量 127.4 毫米、较常年偏多这个信息很关键——"
+            "土壤偏饱和意味着后续降雨的径流系数会抬高，同样的雨可能形成更大的洪峰，"
+            "研判时我会把这个作为重要背景考虑。"
+        )},
+    ]
+    # 填充轮：5 个主题 × 2 轮次循环（数值随机但 seed 确定性）
+    for i in range(10):
+        topic_q, topic_a = _FILLER_TOPICS[i % len(_FILLER_TOPICS)]
+        history.append({"role": "user", "content": topic_q})
+        history.append({"role": "assistant", "content": topic_a.format(
+            station=station,
+            q1=q_low + i * 10,
+            q2=q_high + i * 15,
+        )})
+    return history
+
+
+def _make_compression_cases(n: int, rng: random.Random, base_seed: int) -> list[EvalCase]:
+    """压缩等价性用例：历史超 4000 token 预算、针埋早轮，末轮提问验针保留。"""
+    stations = list(STATIONS)
+    cases: list[EvalCase] = []
+    for i in range(n):
+        station = stations[i % len(stations)]
+        level_value = _COMPRESSION_NEEDLES[station]
+        query = _COMPRESSION_QUERY_TPL[(i // len(stations)) % len(_COMPRESSION_QUERY_TPL)] \
+            .format(station=station)
+        cases.append(EvalCase(
+            case_id=f"comp-{i:03d}",
+            case_type="compression",
+            query=query,
+            seed=base_seed + i,
+            history=_make_long_history(rng, station, level_value),
+            needle_substrings=(level_value, "127.4"),
+            expected_intent=None,  # 凭历史作答不强制意图与工具
+            capabilities=(CAP_NEEDLE,),
+        ))
+    return cases
+
+
+# ====== 工具边界用例（BFCL 式：无关/幻觉/元工具/并行/串行，experiments 回归门禁消费） ======
+
+# 纯超范围：与防汛值守无关，期望零工具调用（含元工具）
+_EDGE_OUT_OF_SCOPE_PURE = [
+    "帮我订一张明天去西安的高铁票。",
+    "把这段会议录音转成文字纪要。",
+    "帮我预测一下下周股市走势。",
+    "给值班邮箱发一封防汛物资清单邮件。",
+]
+# 能力相邻：本系统没有对应工具，期望不乱调数据工具（允许 list_skills 自查）
+_EDGE_OUT_OF_SCOPE_ADJACENT = [
+    "调取吴堡站的雷达回波图分析一下降雨趋势。",
+    "用卫星云图看看吕梁上空的水汽情况。",
+    "画一张吴堡站的水位过程线图并导出图片。",
+    "调取黄河全流域的实时视频监控看看河道情况。",
+]
+_EDGE_META_QUERIES = [
+    "你现在有哪些技能？分别能干什么？",
+    "你支持哪些工具？列一下。",
+    "展示一下你的能力清单。",
+    "看看你都会什么，有哪些本事。",
+]
+_EDGE_MULTI_QUERIES = [
+    "把{station}站的实时水情、当地天气和周边地形一起查全，做综合研判。",
+    "{station}站的水情、气象和地形资料一次性都给我调出来。",
+    "综合{station}站的雨水情和河道地形，把需要的数据都查齐了再分析。",
+    "给{station}站做全面体检：水情、天气、地形全要。",
+]
+_EDGE_SEQUENTIAL_QUERIES = [
+    "预报{station}站未来 6 小时的径流过程。",
+    "{station}站未来半天的来水过程预报一下。",
+    "推演{station}站短时径流变化趋势。",
+    "预估{station}站接下来几小时的流量过程。",
+]
+
+
+def _make_tool_edge_cases(n: int, rng: random.Random, base_seed: int) -> list[EvalCase]:
+    """工具边界用例：out_of_scope(8) + meta(4) + multi(4) + sequential(4)。
+
+    BFCL 的 relevance detection / hallucination 类别的领域化：无可满足工具时
+    应克制不调用（precision 严格），元工具合法可调，多工具并行与串行依赖
+    覆盖工具编排能力。
+    """
+    cases: list[EvalCase] = []
+    stations = list(STATIONS)
+    levels = ["II", "III"]
+
+    def _add(cid: str, query: str, seed_off: int, **kw) -> None:
+        cases.append(EvalCase(
+            case_id=cid,
+            case_type="tool_edge",
+            query=query,
+            seed=base_seed + seed_off,
+            capabilities=(CAP_TOOLS,),
+            **kw,
+        ))
+
+    for i, q in enumerate(_EDGE_OUT_OF_SCOPE_PURE[: n]):
+        _add(f"edge-oop-{i:03d}", q, i,
+             required_tools=frozenset(), allowed_tools=frozenset(),
+             expected_intent=None)
+    for i, q in enumerate(_EDGE_OUT_OF_SCOPE_ADJACENT[: max(0, n - 4)]):
+        _add(f"edge-adj-{i:03d}", q, 100 + i,
+             required_tools=frozenset(), allowed_tools=_META_TOOLS,
+             expected_intent=None)
+    for i, q in enumerate(_EDGE_META_QUERIES[: max(0, n - 8)]):
+        _add(f"edge-meta-{i:03d}", q, 200 + i,
+             required_tools=frozenset({"list_skills"}), allowed_tools=None,
+             expected_intent=None)
+    for i, q in enumerate(_EDGE_MULTI_QUERIES[: max(0, n - 12)]):
+        station = stations[i % len(stations)]
+        _add(f"edge-multi-{i:03d}", q.format(station=station), 300 + i,
+             overrides=_make_overrides(rng, station, levels[i % 2]),
+             required_tools=frozenset({"get_hydrology", "get_weather", "query_gis_terrain"}),
+             allowed_tools=_DATA_OR_PLAN | _META_TOOLS)
+    for i, q in enumerate(_EDGE_SEQUENTIAL_QUERIES[: max(0, n - 16)]):
+        station = stations[i % len(stations)]
+        _add(f"edge-seq-{i:03d}", q.format(station=station), 400 + i,
+             overrides=_make_overrides(rng, station, levels[i % 2]),
+             required_tools=frozenset({"predict_runoff"}),
+             allowed_tools=_DATA_OR_PLAN | _META_TOOLS)
+    return cases
+
+
 def build_cases(
     n_business: int = 30,
     n_chitchat: int = 10,
     n_regulation: int = 8,
     n_web_search: int = 8,
     n_trap: int = 6,
+    n_memory: int = 0,
+    n_compression: int = 0,
+    n_tool_edge: int = 0,
     seed: int = EVAL_SEED_BASE,
 ) -> list[EvalCase]:
-    """构建评估数据集（确定性：同参数生成结果完全一致）。"""
+    """构建评估数据集（确定性：同参数生成结果完全一致）。
+
+    新三类默认 0 条：默认组合保持 62 条不变，确保与既有基线可比
+    （regression.py 的组合一致性检查），由 --experiment / 显式参数启用。
+    """
     assert_seed_isolation()
     rng = random.Random(seed)
     cases: list[EvalCase] = []
@@ -271,6 +584,10 @@ def build_cases(
             allowed_tools=frozenset({"web_search", "search_regulation"}) | _META_TOOLS,
             capabilities=(CAP_TOOLS, CAP_CITATION, CAP_INTENT),
         ))
+
+    cases += _make_memory_cases(n_memory, rng, seed + 6000)
+    cases += _make_compression_cases(n_compression, rng, seed + 7000)
+    cases += _make_tool_edge_cases(n_tool_edge, rng, seed + 8000)
 
     assert all(c.case_type in CASE_TYPES for c in cases)
     return cases

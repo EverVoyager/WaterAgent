@@ -11,12 +11,21 @@
 """
 import math
 
-from evals.cases import CAP_CITATION, CAP_INTENT, CAP_LEVEL, CAP_RESIST, CAP_TOOLS
+from evals.cases import (
+    CAP_CITATION,
+    CAP_INTENT,
+    CAP_LEVEL,
+    CAP_MEMORY,
+    CAP_NEEDLE,
+    CAP_RESIST,
+    CAP_TOOLS,
+)
 
 # 所有布尔检查项（确定性指标的计算来源）
 _CHECK_KEYS = (
     "level_exact", "level_adjacent", "intent_ok", "tool_recall",
     "tool_precision", "sequence_valid", "citation_ok", "trap_resisted",
+    "needle_found",
 )
 
 
@@ -100,7 +109,8 @@ def capability_matrix(records: list[dict]) -> dict[str, dict]:
     检查项通过才算该用例通过，避免"等级对了但工具乱调"虚增能力分。
     """
     matrix = {}
-    for cap in (CAP_INTENT, CAP_TOOLS, CAP_LEVEL, CAP_CITATION, CAP_RESIST):
+    for cap in (CAP_INTENT, CAP_TOOLS, CAP_LEVEL, CAP_CITATION, CAP_RESIST,
+                CAP_MEMORY, CAP_NEEDLE):
         sub = [r for r in records if cap in r.get("capabilities", [])]
         matrix[cap] = binomial_ci(sum(1 for r in sub if r.get("passed")), len(sub))
     return matrix
