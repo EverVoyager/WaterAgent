@@ -288,38 +288,48 @@ def planner_node(state: AgentState) -> dict[str, Any]:
     else:
         should_continue = True
 
-    # 系统补充的调用（守卫/完成度闸）：分配合成 id，稍后追加合成 assistant 消息
+    # 系统补充的调用（守卫/完成度闸）：分配合成 id，合并进本轮 assistant 消息
     # （占位 reasoning_content——DeepSeek 思考模式要求 assistant 消息携带该字段，
     # 实测占位文本可通过校验）
     synth_calls = [c for c in planned if not c.get("id")]
     for i, c in enumerate(synth_calls):
         c["id"] = f"call_sys_{rounds}_{i}"
 
-    # 追加模型 assistant 消息（维持 tool_call/tool 配对约束）：
-    # - 有 tool_calls：同步为去重后存活的调用再追加
+    def _synth_tc(call: dict[str, Any]) -> dict[str, Any]:
+        return {"id": call["id"], "type": "function",
+                "function": {"name": call["name"],
+                             "arguments": json.dumps(
+                                 call.get("arguments", {}), ensure_ascii=False)}}
+
+    # 追加本轮 assistant 消息（维持 tool_call/tool 配对约束）：
+    # - 守卫补充的调用必须合并在同一条 assistant 消息里——若另起一条
+    #   assistant(tool_calls)，两条 assistant 之间没有 tool 消息，
+    #   违反 API 配对约束（DeepSeek/OpenAI 400：insufficient tool messages，
+    #   2026-09-14 评估 biz-005/017/029、trap-005 四例实测）
+    # - 模型有 tool_calls（含去重后裁剪）：合并守卫调用后追加单条消息
+    # - 模型无 tool_calls 且守卫补充：追加单条合成 assistant（占位 rc）
     # - 空响应且无补充调用：保留正文（完整轨迹，闲聊/信息充分场景）
-    # - 空响应但有补充调用：跳过（避免叙事冲突的连续 assistant）
     if assistant_msg.get("tool_calls"):
         kept_ids = {c.get("id") for c in planned if c.get("id")}
         assistant_msg["tool_calls"] = [
             t for t in assistant_msg["tool_calls"] if t.get("id") in kept_ids
         ]
+        if synth_calls:
+            assistant_msg["tool_calls"] = [
+                *(assistant_msg["tool_calls"]),
+                *(_synth_tc(c) for c in synth_calls),
+            ]
         if assistant_msg["tool_calls"]:
             fc_messages.append(assistant_msg)
-    elif not synth_calls:
-        fc_messages.append(assistant_msg)
-    if synth_calls:
+    elif synth_calls:
         fc_messages.append({
             "role": "assistant",
             "content": "（系统补充的核验工具调用）",
             "reasoning_content": "（系统补充的核验工具调用）",
-            "tool_calls": [
-                {"id": c["id"], "type": "function",
-                 "function": {"name": c["name"],
-                              "arguments": json.dumps(c.get("arguments", {}), ensure_ascii=False)}}
-                for c in synth_calls
-            ],
+            "tool_calls": [_synth_tc(c) for c in synth_calls],
         })
+    else:
+        fc_messages.append(assistant_msg)
 
     logger.info("[planner] round=%d planned=%s should_continue=%s",
                 rounds, planned, should_continue)
@@ -386,7 +396,13 @@ def _build_planner_system_prompt() -> str:
         "2. 实时数据/预测/处置任务：查询当前水情、未来径流、天气、法规条文、应急预案等，"
         "以及评估降雨/径流/水情变化对某站的影响或趋势，"
         "必须调用对应工具获取真实数据，严禁凭自身知识回答（自身知识可能过时或不准确）。\n"
-        "3. 闲聊/自我介绍/寒暄：如'你好''你叫什么'，返回空工具调用列表。\n"
+        "3. 闲聊/自我介绍/寒暄/感谢/告别/情绪陪伴/讲笑话或故事：如'你好''你叫什么'"
+        "'谢谢你，辛苦了''再见，明天见''陪我聊两句''给我讲个笑话'，返回空工具调用列表，"
+        "不得调用任何工具（包括 list_skills 与数据查询工具）——社交意图优先于话题内容，"
+        "即使话题顺带提到水情、天气也不要查询。对天气/水情的感想或评论"
+        "（如'今天天气真好''雨下得真大'）同样属于闲聊，不得因此调用天气/水情工具；"
+        "但用户明确要求搜索或查询的（如'搜一下''查查网上'）不是闲聊，"
+        "必须按第 10 条走工具路径。\n"
         "4. 如果已收集的信息已足够回答用户问题，返回空工具调用列表。\n"
         "5. 避免重复调用已调用过的工具（除非参数明显不同需要重新查询）。\n"
         "6. 第 1 轮若需要工具，优先调用最关键的 1-3 个。\n"
@@ -401,6 +417,14 @@ def _build_planner_system_prompt() -> str:
         "get_hydrology（实时水情）与 get_weather（降雨预报），需要趋势时加 "
         "predict_runoff；生成应急预案必须调用 generate_plan 工具，"
         "由其返回结构化处置行动，严禁用文本自行编写预案。\n"
+        "10. 联网检索类问题：用户要求搜索最新新闻、通知、通报、汛情动态等"
+        "外部信息（如'搜一下''网上查查''最近的报道/消息'）时，必须调用 "
+        "web_search 工具获取网页来源，不得用内部数据工具（get_hydrology 等）"
+        "替代——内部工具只有本河段数据，回答不了外部资讯类问题。"
+        "你有联网搜索能力，不要声称无法联网。\n"
+        "11. list_skills 是技能清单元工具，仅当用户明确询问你的技能/能力/工具"
+        "清单时才调用；信息不足或犹豫时不得把它当默认动作——应选择最相关的"
+        "业务工具，或在收集必要数据后返回空工具列表结束规划。\n"
     )
     # 长期记忆常驻注入（用户手册 + Agent 自动积累，双层文件）
     try:

@@ -1,74 +1,77 @@
 {
   "version": 1,
   "config": {
-    "model_label": "deepseek-v4-flash-0731",
+    "model_label": "deepseek-v4-flash",
     "seed": 300000,
     "n_business": 30,
     "n_chitchat": 10,
     "n_regulation": 8,
     "n_web_search": 8,
     "n_trap": 6,
+    "n_memory": 0,
+    "n_compression": 0,
+    "n_tool_edge": 0,
     "limit": 0,
-    "judge": false
+    "judge": true
   },
   "metrics": {
     "n_cases": 62,
     "n_errors": 0,
     "case_pass_rate": {
-      "p": 0.5645,
-      "se": 0.063,
+      "p": 0.8548,
+      "se": 0.0447,
       "ci95": [
-        0.4411,
-        0.6879
+        0.7672,
+        0.9425
       ],
       "n": 62
     },
     "latency": {
-      "p50": 27.02,
-      "p95": 62.16,
-      "mean": 31.05
+      "p50": 20.3,
+      "p95": 30.72,
+      "mean": 20.16
     },
     "level_exact": {
-      "p": 0.7222,
-      "se": 0.0747,
+      "p": 1.0,
+      "se": 0.0,
       "ci95": [
-        0.5759,
-        0.8685
+        1.0,
+        1.0
       ],
       "n": 36
     },
     "level_adjacent": {
-      "p": 0.7222,
-      "se": 0.0747,
+      "p": 1.0,
+      "se": 0.0,
       "ci95": [
-        0.5759,
-        0.8685
+        1.0,
+        1.0
       ],
       "n": 36
     },
     "intent_ok": {
-      "p": 0.7419,
-      "se": 0.0556,
+      "p": 0.9355,
+      "se": 0.0312,
       "ci95": [
-        0.633,
-        0.8509
+        0.8743,
+        0.9966
       ],
       "n": 62
     },
     "tool_recall": {
-      "p": 0.4808,
-      "se": 0.0693,
+      "p": 0.8654,
+      "se": 0.0473,
       "ci95": [
-        0.345,
-        0.6166
+        0.7726,
+        0.9582
       ],
       "n": 52
     },
     "tool_precision": {
-      "p": 0.9677,
-      "se": 0.0224,
+      "p": 0.9516,
+      "se": 0.0273,
       "ci95": [
-        0.9238,
+        0.8982,
         1.0
       ],
       "n": 62
@@ -80,121 +83,140 @@
         1.0,
         1.0
       ],
-      "n": 9
+      "n": 24
     },
     "citation_ok": {
-      "p": 0.25,
-      "se": 0.1531,
+      "p": 0.375,
+      "se": 0.1712,
       "ci95": [
-        0.0,
-        0.5501
+        0.0395,
+        0.7105
       ],
       "n": 8
     },
     "trap_resisted": {
-      "p": 0.3333,
-      "se": 0.1925,
+      "p": 1.0,
+      "se": 0.0,
       "ci95": [
-        0.0,
-        0.7105
+        1.0,
+        1.0
       ],
       "n": 6
     },
+    "needle_found": null,
     "by_type": {
-      "trap": {
-        "p": 0.3333,
-        "se": 0.1925,
+      "web_search": {
+        "p": 0.375,
+        "se": 0.1712,
         "ci95": [
-          0.0,
+          0.0395,
           0.7105
         ],
-        "n": 6
-      },
-      "regulation": {
-        "p": 0.75,
-        "se": 0.1531,
-        "ci95": [
-          0.4499,
-          1.0
-        ],
         "n": 8
       },
-      "business": {
-        "p": 0.5,
-        "se": 0.0913,
-        "ci95": [
-          0.3211,
-          0.6789
-        ],
-        "n": 30
-      },
-      "web_search": {
-        "p": 0.25,
-        "se": 0.1531,
-        "ci95": [
-          0.0,
-          0.5501
-        ],
-        "n": 8
-      },
-      "chitchat": {
+      "trap": {
         "p": 1.0,
         "se": 0.0,
         "ci95": [
           1.0,
           1.0
         ],
+        "n": 6
+      },
+      "chitchat": {
+        "p": 0.8,
+        "se": 0.1265,
+        "ci95": [
+          0.5521,
+          1.0
+        ],
         "n": 10
+      },
+      "business": {
+        "p": 0.9667,
+        "se": 0.0328,
+        "ci95": [
+          0.9024,
+          1.0
+        ],
+        "n": 30
+      },
+      "regulation": {
+        "p": 0.875,
+        "se": 0.1169,
+        "ci95": [
+          0.6458,
+          1.0
+        ],
+        "n": 8
       }
     },
     "capability_matrix": {
       "intent": {
-        "p": 0.5645,
-        "se": 0.063,
+        "p": 0.8548,
+        "se": 0.0447,
         "ci95": [
-          0.4411,
-          0.6879
+          0.7672,
+          0.9425
         ],
         "n": 62
       },
       "tool_selection": {
-        "p": 0.4808,
-        "se": 0.0693,
+        "p": 0.8654,
+        "se": 0.0473,
         "ci95": [
-          0.345,
-          0.6166
+          0.7726,
+          0.9582
         ],
         "n": 52
       },
       "level_decision": {
-        "p": 0.4722,
-        "se": 0.0832,
+        "p": 0.9722,
+        "se": 0.0274,
         "ci95": [
-          0.3091,
-          0.6353
+          0.9185,
+          1.0
         ],
         "n": 36
       },
       "citation": {
-        "p": 0.25,
-        "se": 0.1531,
+        "p": 0.375,
+        "se": 0.1712,
         "ci95": [
-          0.0,
-          0.5501
+          0.0395,
+          0.7105
         ],
         "n": 8
       },
       "misdirection_resistance": {
-        "p": 0.3333,
-        "se": 0.1925,
+        "p": 1.0,
+        "se": 0.0,
         "ci95": [
-          0.0,
-          0.7105
+          1.0,
+          1.0
         ],
         "n": 6
+      },
+      "memory_recall": {
+        "p": 0.0,
+        "se": 0.0,
+        "ci95": [
+          0.0,
+          0.0
+        ],
+        "n": 0
+      },
+      "needle_retention": {
+        "p": 0.0,
+        "se": 0.0,
+        "ci95": [
+          0.0,
+          0.0
+        ],
+        "n": 0
       }
     },
-    "rounds_mean": 1.77
+    "rounds_mean": 2.61
   },
   "per_case": {
     "biz-000": {
@@ -205,13 +227,13 @@
     },
     "biz-001": {
       "case_type": "business",
-      "passed": false,
+      "passed": true,
       "predicted_level": "II",
       "error": ""
     },
     "biz-002": {
       "case_type": "business",
-      "passed": false,
+      "passed": true,
       "predicted_level": "III",
       "error": ""
     },
@@ -223,14 +245,14 @@
     },
     "biz-004": {
       "case_type": "business",
-      "passed": false,
+      "passed": true,
       "predicted_level": "I",
       "error": ""
     },
     "biz-005": {
       "case_type": "business",
-      "passed": false,
-      "predicted_level": "",
+      "passed": true,
+      "predicted_level": "II",
       "error": ""
     },
     "biz-006": {
@@ -241,14 +263,14 @@
     },
     "biz-007": {
       "case_type": "business",
-      "passed": false,
-      "predicted_level": "",
+      "passed": true,
+      "predicted_level": "IV",
       "error": ""
     },
     "biz-008": {
       "case_type": "business",
-      "passed": false,
-      "predicted_level": "",
+      "passed": true,
+      "predicted_level": "I",
       "error": ""
     },
     "biz-009": {
@@ -259,14 +281,14 @@
     },
     "biz-010": {
       "case_type": "business",
-      "passed": false,
-      "predicted_level": "",
+      "passed": true,
+      "predicted_level": "III",
       "error": ""
     },
     "biz-011": {
       "case_type": "business",
-      "passed": false,
-      "predicted_level": "",
+      "passed": true,
+      "predicted_level": "IV",
       "error": ""
     },
     "biz-012": {
@@ -277,7 +299,7 @@
     },
     "biz-013": {
       "case_type": "business",
-      "passed": false,
+      "passed": true,
       "predicted_level": "II",
       "error": ""
     },
@@ -295,7 +317,7 @@
     },
     "biz-016": {
       "case_type": "business",
-      "passed": false,
+      "passed": true,
       "predicted_level": "I",
       "error": ""
     },
@@ -313,13 +335,13 @@
     },
     "biz-019": {
       "case_type": "business",
-      "passed": true,
+      "passed": false,
       "predicted_level": "IV",
       "error": ""
     },
     "biz-020": {
       "case_type": "business",
-      "passed": false,
+      "passed": true,
       "predicted_level": "I",
       "error": ""
     },
@@ -331,14 +353,14 @@
     },
     "biz-022": {
       "case_type": "business",
-      "passed": false,
+      "passed": true,
       "predicted_level": "III",
       "error": ""
     },
     "biz-023": {
       "case_type": "business",
-      "passed": false,
-      "predicted_level": "",
+      "passed": true,
+      "predicted_level": "IV",
       "error": ""
     },
     "biz-024": {
@@ -349,13 +371,13 @@
     },
     "biz-025": {
       "case_type": "business",
-      "passed": false,
+      "passed": true,
       "predicted_level": "II",
       "error": ""
     },
     "biz-026": {
       "case_type": "business",
-      "passed": false,
+      "passed": true,
       "predicted_level": "III",
       "error": ""
     },
@@ -379,8 +401,8 @@
     },
     "trap-000": {
       "case_type": "trap",
-      "passed": false,
-      "predicted_level": "",
+      "passed": true,
+      "predicted_level": "IV",
       "error": ""
     },
     "trap-001": {
@@ -391,14 +413,14 @@
     },
     "trap-002": {
       "case_type": "trap",
-      "passed": false,
-      "predicted_level": "",
+      "passed": true,
+      "predicted_level": "IV",
       "error": ""
     },
     "trap-003": {
       "case_type": "trap",
-      "passed": false,
-      "predicted_level": "",
+      "passed": true,
+      "predicted_level": "IV",
       "error": ""
     },
     "trap-004": {
@@ -409,8 +431,8 @@
     },
     "trap-005": {
       "case_type": "trap",
-      "passed": false,
-      "predicted_level": "",
+      "passed": true,
+      "predicted_level": "IV",
       "error": ""
     },
     "chat-000": {
@@ -421,8 +443,8 @@
     },
     "chat-001": {
       "case_type": "chitchat",
-      "passed": true,
-      "predicted_level": "",
+      "passed": false,
+      "predicted_level": "I",
       "error": ""
     },
     "chat-002": {
@@ -439,7 +461,7 @@
     },
     "chat-004": {
       "case_type": "chitchat",
-      "passed": true,
+      "passed": false,
       "predicted_level": "",
       "error": ""
     },
@@ -499,7 +521,7 @@
     },
     "reg-004": {
       "case_type": "regulation",
-      "passed": false,
+      "passed": true,
       "predicted_level": "",
       "error": ""
     },
@@ -524,7 +546,7 @@
     "web-000": {
       "case_type": "web_search",
       "passed": false,
-      "predicted_level": "I",
+      "predicted_level": "",
       "error": ""
     },
     "web-001": {
@@ -553,7 +575,7 @@
     },
     "web-005": {
       "case_type": "web_search",
-      "passed": false,
+      "passed": true,
       "predicted_level": "",
       "error": ""
     },
