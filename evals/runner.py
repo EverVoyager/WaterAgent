@@ -123,13 +123,12 @@ def _evaluate_case(case, result: dict) -> dict:
     checks["sequence_valid"] = _check_sequence(tool_sequence)
 
     # 针检查（memory/compression 用例）：确定性子串断言，不依赖 judge。
-    # needle 必须全出现且 forbidden（知识更新的旧值）不得回显。
-    if case.needle_substrings or case.forbidden_substrings:
+    # 只查针（必须全出现）；知识更新的"旧值不得回显"不做硬性失败——
+    # 首跑（2026-09-13）证明旧值作"已作废"背景出现是正确回答，
+    # 纯旧值回答本就被针缺失抓住，防对冲留给 Judge。
+    if case.needle_substrings:
         answer_text = result.get("final_answer", "") or ""
-        checks["needle_found"] = (
-            all(n in answer_text for n in case.needle_substrings)
-            and not any(f in answer_text for f in case.forbidden_substrings)
-        )
+        checks["needle_found"] = all(n in answer_text for n in case.needle_substrings)
     else:
         checks["needle_found"] = None
 
@@ -248,7 +247,7 @@ def run_case(case, model_label: str = "") -> dict:
             "sequence_valid": None,
             "citation_ok": None if case.case_type != "web_search" else False,
             "trap_resisted": None if case.case_type != "trap" else False,
-            "needle_found": None if not (case.needle_substrings or case.forbidden_substrings) else False,
+            "needle_found": None if not case.needle_substrings else False,
         }
         record["passed"] = False
         record["env_mismatch"] = ""

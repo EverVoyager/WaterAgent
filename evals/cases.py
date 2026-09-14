@@ -72,8 +72,10 @@ class EvalCase:
         history: 预置会话历史（memory/compression 用例：多轮脚本，压缩用例须超预算）
         memory_payload: 脚本化记忆注入内容（key ∈ longterm/experiences/semantic，
             模拟已积累的记忆库；experiments/memory.py 的 patch 消费）
-        needle_substrings: 答案必须包含的子串（针检查：确定性，不依赖 judge）
-        forbidden_substrings: 答案不得包含的子串（知识更新用例：旧值不得回显）
+        needle_substrings: 答案必须包含的子串（针检查：确定性，不依赖 judge）。
+            知识更新用例只查新值针——首跑（2026-09-13）证明旧值 forbidden 硬性
+            失败是误报：模型答"现为 5800（原 5500 已作废）"属正确行为；
+            纯旧值回答本就会被针缺失抓住，防对冲留给 Judge。
         capabilities:   能力标签列表
     """
     case_id: str
@@ -90,7 +92,6 @@ class EvalCase:
     history: list = field(default_factory=list)
     memory_payload: dict = field(default_factory=dict)
     needle_substrings: tuple = ()
-    forbidden_substrings: tuple = ()
     capabilities: tuple = ()
 
     def to_env(self) -> dict:
@@ -250,9 +251,9 @@ _MEMORY_FACTS = {
 }
 _MEMORY_FACT_QUERY_TPL = [
     "结合你记住的站点档案回答：{station}站的{item}是多少？不用查工具。",
-    "{station}站的{item}是多少？请基于你记住的历史信息回答。",
-    "你之前记过{station}站的{item}吧？说给我听听。",
-    "不用查实时数据，凭记忆说下{station}站的{item}。",
+    "{station}站的{item}是多少？请基于你记住的历史信息回答，不用查工具。",
+    "你之前记过{station}站的{item}吧？凭记忆说，不用查工具。",
+    "不用查工具，凭记忆说下{station}站的{item}。",
 ]
 
 # 知识更新（update 子类）：语义记忆为旧值，近期会话已更正——答案用新值、不得回显旧值
@@ -262,24 +263,24 @@ _MEMORY_UPDATE = {
     "府谷": ("警戒流量", "5500", "5800"),
 }
 _MEMORY_UPDATE_QUERY_TPL = [
-    "结合我们刚才的更正，{station}站的{item}现在是多少？",
-    "{station}站的{item}以哪个数为准？旧值还是更正值？",
+    "结合我们刚才的更正，{station}站的{item}现在是多少？凭对话和记忆回答，不用查工具。",
+    "{station}站的{item}以哪个数为准？旧值还是更正值？凭对话和记忆回答，别查工具。",
 ]
 
 # 时间推理（temporal 子类）：情景记忆中的时间事件，问答需还原事件结论
 _MEMORY_TEMPORAL = [
     ("丁家沟雨量站 9 月 2 日完成校准，此前雨量数据系统性偏低约 5%。",
-     "丁家沟站 9 月 1 日之前的雨量数据还能直接用吗？", ("偏低",)),
+     "丁家沟站 9 月 1 日之前的雨量数据还能直接用吗？凭你记住的经验回答，不用查工具。", ("偏低",)),
     ("上游 8 月 28 日调度会决议：红旗沟水库即日起按 120 立方米每秒预泄腾库。",
-     "红旗沟水库现在应该按多大流量预泄？", ("120",)),
+     "红旗沟水库现在应该按多大流量预泄？凭你记住的调度经验回答，不用查工具。", ("120",)),
     ("前日报汛电话修正：裴沟站 3 日 8 时流量由 2100 修正为 2450 立方米每秒。",
-     "裴沟站 3 日 8 时的流量最终以哪个数为准？", ("2450",)),
+     "裴沟站 3 日 8 时的流量最终以哪个数为准？凭记忆回答，不用查工具。", ("2450",)),
     ("白乙沟水文站 9 月起迁址至下游 300 米新断面，新旧断面水位不作换算。",
-     "白乙沟站的水位数据和迁址前怎么衔接？", ("不作换算",)),
+     "白乙沟站的水位数据和迁址前怎么衔接？凭你记住的情况回答，不用查工具。", ("不作换算",)),
     ("8 月 30 日测流缆道检修，当晚白乙沟流量缺测，已用插补值代替。",
-     "8 月 30 日晚白乙沟的流量数据是实测的吗？", ("插补",)),
+     "8 月 30 日晚白乙沟的流量数据是实测的吗？凭记忆回答，不用查工具。", ("插补",)),
     ("9 月 1 日起全河段报汛频次由每小时 1 次加密为每小时 2 次。",
-     "现在的报汛频次是多少？和 9 月前比有什么变化？", ("加密",)),
+     "现在的报汛频次是多少？和 9 月前比有什么变化？凭记忆回答，不用查工具。", ("加密",)),
 ]
 
 
@@ -305,7 +306,7 @@ def _make_memory_cases(n: int, rng: random.Random, base_seed: int) -> list[EvalC
                 f"【长期记忆·站点档案】{station}站{item} {value}"
                 f"（2024 年汛期核定，值班交接时登记）。"
             )}
-            needles, forbidden = (value,), ()
+            needles = (value,)
         elif subtype == "update":
             item, old, new = _MEMORY_UPDATE[station]
             query = _MEMORY_UPDATE_QUERY_TPL[(i // 4) % len(_MEMORY_UPDATE_QUERY_TPL)] \
@@ -321,20 +322,25 @@ def _make_memory_cases(n: int, rng: random.Random, base_seed: int) -> list[EvalC
                     f"已了解，{station}站{item}以更正值 {new} 为准。"
                 )},
             ]
-            needles, forbidden = (new,), (old,)
+            # 只查新值针：旧值作"已作废"背景出现是正确行为（首跑证明
+            # forbidden 硬性失败误杀全部 6 条正确回答）；纯旧值回答
+            # 会被针缺失抓住。该子类实际测的是"陈旧记忆不覆盖更正"
+            needles = (new,)
         else:
             fact, query, needles = _MEMORY_TEMPORAL[(i // 4) % len(_MEMORY_TEMPORAL)]
             payload = {"experiences": f"【情景记忆】{fact}"}
-            forbidden = ()
+        # 平稳档 overrides：记忆问答若仍触发了数据工具，规则引擎判Ⅳ级
+        # （无 overrides 时 mock 走宽幅随机，会出现 5000+ 流量/极端雨量的
+        # Ⅰ级数据，触发 synthesizer 等级校验重试，污染记忆回答）
         cases.append(EvalCase(
             case_id=f"mem-{i:03d}",
             case_type="memory",
             query=query,
             seed=base_seed + i,
+            overrides=_make_overrides(rng, station, "IV"),
             history=history,
             memory_payload=payload,
             needle_substrings=needles,
-            forbidden_substrings=forbidden,
             expected_intent=None,  # 记忆问答两类意图皆可，判定只看针
             capabilities=(CAP_MEMORY,),
         ))
@@ -349,9 +355,9 @@ _COMPRESSION_NEEDLES = {
     "府谷": "812.45",
 }
 _COMPRESSION_QUERY_TPL = [
-    "回顾我们前面聊过的内容：{station}站的警戒水位是多少？前期流域累积降雨量达到多少毫米？",
-    "只根据我们之前的对话回答：{station}站警戒水位和入汛以来流域累积降雨量分别是多少？",
-    "刚才对话里提到过{station}站的警戒水位和累积降雨量，分别是多少来着？",
+    "回顾我们前面聊过的内容：{station}站的警戒水位是多少？前期流域累积降雨量达到多少毫米？凭对话回答，不用查工具。",
+    "只根据我们之前的对话回答：{station}站警戒水位和入汛以来流域累积降雨量分别是多少？不用查工具。",
+    "刚才对话里提到过{station}站的警戒水位和累积降雨量，分别是多少来着？凭对话回答，别查工具。",
     "不用查工具，凭我们前面的对话说：{station}站警戒水位多少？流域前期累积雨量多少？",
 ]
 
@@ -449,6 +455,9 @@ def _make_compression_cases(n: int, rng: random.Random, base_seed: int) -> list[
             case_type="compression",
             query=query,
             seed=base_seed + i,
+            # 平稳档 overrides：末轮提问若触发数据工具，规则引擎判Ⅳ级，
+            # 避免 mock 宽幅随机的极端数据把针问答带成红色预警重试
+            overrides=_make_overrides(rng, station, "IV"),
             history=_make_long_history(rng, station, level_value),
             needle_substrings=(level_value, "127.4"),
             expected_intent=None,  # 凭历史作答不强制意图与工具

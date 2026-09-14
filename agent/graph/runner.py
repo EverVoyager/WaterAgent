@@ -211,11 +211,13 @@ def _stream_chitchat_branch(
     cancel_event: threading.Event | None = None,
     raw_history: list[dict[str, Any]] | None = None,
     recalled_context: str = "",
+    experiences: str = "",
 ):
     """闲聊分支：流式 LLM 对话。
 
     yields reasoning_step + answer_delta 事件，最终 yield done 事件。
     raw_history：未压缩的原始 history（收尾归档用，缺省退回 history）。
+    experiences：planner round-1 检索的历史经验（方案 A 作答端注入）。
     """
     yield {"type": "reasoning_step", "step": "direct_chat", "phase": "start",
            "message": "正在生成回复...", "details": {}}
@@ -223,6 +225,7 @@ def _stream_chitchat_branch(
     for ev in _direct_chat_stream(
         user_query, history or [], skill_instructions,
         recalled_context=recalled_context,
+        experiences=experiences,
     ):
         # 客户端已断开：停止消费 LLM 流，提前结束
         if cancel_event is not None and cancel_event.is_set():
@@ -287,6 +290,7 @@ def _stream_planner_executor_loop(
                     user_query, history, state.get("skill_instructions", ""),
                     cancel_event, raw_history=raw_history,
                     recalled_context=state.get("recalled_context", ""),
+                    experiences=state.get("experiences", ""),
                 )
                 return True
             # 后续轮次无工具，信息已充分，结束循环进 synthesizer
@@ -366,6 +370,7 @@ def _stream_synthesizer_phase(
     for ev in _synth_via_llm_stream(
         user_query, tool_results, history, skill_instructions,
         recalled_context=state.get("recalled_context", ""),
+        experiences=state.get("experiences", ""),  # 方案 A：作答端消费
     ):
         # 客户端已断开：停止消费 LLM token 流，提前结束
         if cancel_event is not None and cancel_event.is_set():

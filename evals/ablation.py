@@ -19,10 +19,13 @@ from evals.metrics import binomial_ci
 
 logger = logging.getLogger(__name__)
 
-# 记忆注入入口（agent.memory 包命名空间；节点运行时 import 该包，patch 生效）
+# 记忆注入入口（agent.memory 包命名空间；节点运行时 import 该包，patch 生效）。
+# 方案 A（2026-09-14）后 experiences 的消费面扩展为三节点：
+# planner round-1 检索一次写入 state → planner/direct_chat/synthesizer 共同消费，
+# patch 此函数即可同时关闭三个节点的经验注入（仍是单一检索入口）
 _MEMORY_INJECTION_POINTS = (
     "agent.memory.build_longterm_section",      # 长期记忆（planner/synthesizer/direct_chat）
-    "agent.memory.get_relevant_experiences",    # 情景+程序记忆（planner）
+    "agent.memory.get_relevant_experiences",    # 情景+程序记忆（planner 检索，三节点消费）
     "agent.memory.get_semantic_knowledge",      # 语义记忆（synthesizer）
 )
 

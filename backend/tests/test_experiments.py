@@ -180,13 +180,20 @@ class TestNewCaseTypes:
         assert len(mem) == 24
         assert all(c.memory_payload and c.needle_substrings for c in mem)
         assert all(c.expected_intent is None for c in mem)
-        # 知识更新子类：payload 旧值 + history 更正 + forbidden 旧值
-        update_cases = [c for c in mem if c.forbidden_substrings]
-        assert update_cases, "知识更新子类应带 forbidden_substrings"
+        # 平稳档 overrides 必须设置：无 overrides 时 mock 宽幅随机会产生
+        # Ⅰ级极端数据，触发 synthesizer 等级校验重试污染记忆回答
+        assert all(c.overrides for c in mem)
+        # 查询必须带"不用查工具"类措辞（引导走记忆/对话路径）
+        assert all("工具" in c.query for c in mem)
+        # 知识更新子类：payload 含旧值 + history 含更正（判据 v2 只查新值针，
+        # 旧值作"已作废"背景出现不判失败——首跑证明 forbidden 硬性失败误杀）
+        update_cases = [
+            c for c in mem
+            if c.case_type == "memory" and c.memory_payload.get("semantic")
+        ]
+        assert update_cases, "知识更新子类应存在（payload 带 semantic）"
         for c in update_cases:
             assert c.history, "知识更新子类应带更正会话历史"
-            assert any(f in c.memory_payload["semantic"]
-                       for f in c.forbidden_substrings)
             assert all(n in c.history[0]["content"] for n in c.needle_substrings)
         # 种子隔离
         assert all(300_000 <= c.seed < 400_000 for c in mem)
@@ -198,6 +205,8 @@ class TestNewCaseTypes:
         comp = [c for c in cases if c.case_type == "compression"]
         assert len(comp) == 12
         for c in comp:
+            assert c.overrides, f"{c.case_id} 缺平稳档 overrides"
+            assert "工具" in c.query  # 引导凭对话作答
             tokens = sum(estimate_tokens(m.get("content", "")) for m in c.history)
             assert tokens > budget, f"{c.case_id} 历史 {tokens} 未超预算 {budget}"
             # 针必须在历史里（早轮埋下）
@@ -291,14 +300,24 @@ class TestRunnerNeedle:
         assert record["checks"]["needle_found"] is False
         assert record["passed"] is False
 
-    def test_forbidden_substring_fails(self):
+    def test_stale_answer_without_needle_fails(self):
+        """纯旧值回答（针缺失）仍然判失败——防陈旧回显由针检查兜住。"""
         case = _memory_case("m1", needle="6500")
-        case.forbidden_substrings = ("6200",)
         record = self._run_with_fake_agent(case, {
             "final_answer": "吴堡站警戒流量还是 6200。", "warning_level": "",
             "intent": "chitchat", "tool_calls": [], "citations": [], "rounds": 1,
         })
         assert record["checks"]["needle_found"] is False
+
+    def test_old_value_as_background_does_not_fail(self):
+        """判据 v2：旧值作"已作废"背景出现（针在场）不判失败。"""
+        case = _memory_case("m1", needle="6500")
+        record = self._run_with_fake_agent(case, {
+            "final_answer": "以更正值 6500 为准（原 6200 已作废）。", "warning_level": "",
+            "intent": "chitchat", "tool_calls": [], "citations": [], "rounds": 1,
+        })
+        assert record["checks"]["needle_found"] is True
+        assert record["passed"] is True
 
     def test_intent_none_skips_check(self):
         case = _memory_case("m1")
