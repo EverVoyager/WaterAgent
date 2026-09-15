@@ -22,14 +22,13 @@ LEVEL_DESCRIPTION: dict[str, str] = {
     "IV": "Ⅳ级（蓝色）一般",
 }
 
-# 预警等级阈值（全项目统一，synthesizer 逻辑判断 + prompt 描述 + llm guardrail 三处引用）
-WARNING_THRESHOLDS: dict[str, int] = {
-    "flow_level1": 5000,  # Ⅰ级流量阈值 m³/s
-    "flow_level2": 3000,  # Ⅱ级流量阈值
-    "flow_level3": 2000,  # Ⅲ级流量阈值
-    "rain_level1": 100,   # Ⅰ级 24h 降雨阈值 mm
-    "rain_level2": 50,    # Ⅱ级 24h 降雨阈值
-}
+# 预警等级阈值：外置化改造后由 config/thresholds.json 派生（唯一数值来源），
+# 保留此名称兼容既有引用（synthesizer 规则引擎 / reflection 事实门 / llm 默认
+# 提示均调用时动态读值）。换配置热生效用 agent.thresholds.reload_thresholds()——
+# 它会原地 clear+update 本 dict，所有引用方即时跟随。
+from agent.thresholds import get_thresholds  # noqa: E402
+
+WARNING_THRESHOLDS: dict[str, float] = get_thresholds().to_legacy()
 
 
 def parse_json_from_llm(content: str) -> dict[str, Any] | None:

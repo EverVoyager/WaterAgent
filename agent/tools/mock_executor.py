@@ -64,24 +64,27 @@ def _mock_get_weather(params: GetWeatherParams, overrides: dict | None = None) -
 
 
 def _mock_get_hydrology(params: GetHydrologyParams, overrides: dict | None = None) -> dict[str, Any]:
-    """模拟水文站实时水情。"""
-    station_data = {
-        "吴堡": {"base_level": 640.5, "base_flow": 1200},
-        "龙门": {"base_level": 382.3, "base_flow": 2400},
-        "府谷": {"base_level": 810.2, "base_flow": 850},
-    }
-    base = station_data.get(params.station, {"base_level": 500.0, "base_flow": 1000})
+    """模拟水文站实时水情。
+
+    站点档案（基准水位/流量、警戒/保证水位）来自 config/thresholds.json
+    唯一数值来源——旧实现按 base+2.0/+3.5 偏移计算，外置化后配置直接存
+    绝对值（数值与旧偏移结果一致），换档案热生效。
+    """
+    from agent.thresholds import get_thresholds
+
+    st = get_thresholds().station(params.station)
     result = {
         "station": params.station,
         "fetched_at": _now_iso(),
     }
     if params.metric in ("water_level", "both"):
-        result["water_level_m"] = round(base["base_level"] + random.uniform(-0.5, 2.5), 2)
-        result["warning_level_m"] = round(base["base_level"] + 2.0, 2)
-        result["guaranteed_level_m"] = round(base["base_level"] + 3.5, 2)
+        result["water_level_m"] = round(st["base_level_m"] + random.uniform(-0.5, 2.5), 2)
+        result["warning_level_m"] = round(float(st["warning_level_m"]), 2)
+        result["guaranteed_level_m"] = round(float(st["guaranteed_level_m"]), 2)
     if params.metric in ("flow", "both"):
-        result["flow_m3_s"] = round(base["base_flow"] * random.uniform(1.0, 2.5), 0)
-        result["warning_flow_m3_s"] = round(base["base_flow"] * 2.0, 0)
+        base_flow = float(st["base_flow_m3_s"])
+        result["flow_m3_s"] = round(base_flow * random.uniform(1.0, 2.5), 0)
+        result["warning_flow_m3_s"] = round(base_flow * 2.0, 0)
     if overrides:
         result.update(overrides)
     return result

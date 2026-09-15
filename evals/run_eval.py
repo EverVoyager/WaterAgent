@@ -43,6 +43,7 @@ from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv(Path(_BACKEND_ROOT) / ".env")
 
+from agent.thresholds import threshold_version  # noqa: E402
 from evals.ablation import run_memory_ablation  # noqa: E402
 from evals.case_sets import EXPERIMENT_COMPOSITIONS, get_experiment_cases  # noqa: E402
 from evals.cases import EVAL_SEED_BASE, build_cases  # noqa: E402
@@ -213,6 +214,7 @@ def _run_experiment_flow(args: argparse.Namespace, model_label: str) -> int:
         "iterations": args.iterations if experiment == "self-evolution" else None,
         "models": args.models or None,
         "judge": False,
+        "threshold_version": threshold_version(),
     }
 
     print("[eval] 量化声明：")
@@ -293,6 +295,7 @@ def main(argv: list[str] | None = None) -> int:
         "n_tool_edge": args.n_tool_edge,
         "limit": args.limit,
         "judge": args.judge,
+        "threshold_version": threshold_version(),
     }
 
     # 3. 确定性指标
@@ -386,12 +389,19 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _baseline_composition_diff(baseline: dict, config: dict) -> str:
-    """基线与本次运行的用例组合/模型是否一致（不一致则门禁不可比）。"""
+    """基线与本次运行的用例组合/模型是否一致（不一致则门禁不可比）。
+
+    只比较基线自身记录过的键——旧基线未记录的字段（如 threshold_version）
+    无法核验，跳过而不误报；下次基线重建时会钉住该键，此后跨阈值版本
+    的门禁比较会被拦截（映射变更 → 评估重放 → 重建基线的流程守门）。
+    """
     base_cfg = baseline.get("config", {})
     diffs = []
     for key in ("n_business", "n_chitchat", "n_regulation", "n_web_search",
                 "n_trap", "n_memory", "n_compression", "n_tool_edge",
-                "limit", "model_label"):
+                "limit", "model_label", "threshold_version"):
+        if key not in base_cfg:
+            continue
         if base_cfg.get(key) != config.get(key):
             diffs.append(f"{key}: {base_cfg.get(key)}→{config.get(key)}")
     return ", ".join(diffs)

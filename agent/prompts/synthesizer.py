@@ -7,16 +7,25 @@
 - SYNTH_RESPONSE_SCHEMA：非流式研判完整响应 schema（含 answer）
 - SYNTH_META_SCHEMA：两阶段流式 Phase 1 metadata schema（不含 answer）
 """
-from agent.utils import WARNING_THRESHOLDS as _WT
+from agent.thresholds import ThresholdProfile, get_thresholds
 
-_THRESHOLD_DESC = (
-    f"  - Ⅰ级（红）：流量 ≥ {_WT['flow_level1']}m³/s，或水位超保证水位，或24h降雨>{_WT['rain_level1']}mm\n"
-    f"  - Ⅱ级（橙）：流量 {_WT['flow_level2']}-{_WT['flow_level1']}m³/s，或水位超警戒水位，或24h降雨{_WT['rain_level2']}-{_WT['rain_level1']}mm\n"
-    f"  - Ⅲ级（黄）：流量 {_WT['flow_level3']}-{_WT['flow_level2']}m³/s，或水位接近警戒水位\n"
-    f"  - Ⅳ级（蓝）：流量 < {_WT['flow_level3']}m³/s，水位正常"
-)
 
-SYNTHESIZER_PROMPT = """你是黄河吕梁段防汛预警智能体的综合研判模块。
+def _render_threshold_desc(profile: ThresholdProfile) -> str:
+    """阈值描述段（运行时按当前档案渲染——不再 import 时烙印数字）。"""
+    return (
+        f"  - Ⅰ级（红）：流量 ≥ {profile.flow_level1}m³/s，或水位超保证水位，"
+        f"或24h降雨>{profile.rain_level1}mm\n"
+        f"  - Ⅱ级（橙）：流量 {profile.flow_level2}-{profile.flow_level1}m³/s，"
+        f"或水位超警戒水位，或24h降雨{profile.rain_level2}-{profile.rain_level1}mm\n"
+        f"  - Ⅲ级（黄）：流量 {profile.flow_level3}-{profile.flow_level2}m³/s，"
+        f"或水位接近警戒水位\n"
+        f"  - Ⅳ级（蓝）：流量 < {profile.flow_level3}m³/s，水位正常"
+    )
+
+
+# 提示词模板（阈值段运行时插入；拼接法保持与旧 import 时 f-string 逐字节一致，
+# 不动 few-shot 里的花括号）
+_PROMPT_HEAD = """你是黄河吕梁段防汛预警智能体的综合研判模块。
 基于所有工具返回的数据，生成最终回答。
 
 你会遇到两类问题，请自主判断处理方式：
@@ -24,7 +33,9 @@ SYNTHESIZER_PROMPT = """你是黄河吕梁段防汛预警智能体的综合研�
 【类型 1：实时研判类】用户询问当前汛情、需要启动几级响应等。
 - 基于水情/径流/天气数据计算预警等级
 - 等级参考标准：
-""" + _THRESHOLD_DESC + """
+"""
+
+_PROMPT_TAIL = """
 - warning_level 字段填 I/II/III/IV
 
 【类型 2：法规咨询类】用户询问某等级响应应该做什么、法规条款等。
@@ -91,6 +102,24 @@ few-shot 示例（输入 → 输出）：
 8. 不要引用水文、天气、径流、GIS、法规等工具返回的数据作为 citation
 
 仅返回 JSON 对象，不要其他内容。"""
+
+# 运行时渲染 + 按版本缓存（KV 前缀稳定：同版本渲染结果逐字节一致；
+# 换档案（reload_thresholds）后新版本自动重渲染，无需重启）
+_PROMPT_CACHE: dict[str, str] = {}
+
+
+def render_synthesizer_prompt(profile: ThresholdProfile | None = None) -> str:
+    """研判系统提示词（按当前阈值档案渲染，版本内缓存）。"""
+    prof = profile or get_thresholds()
+    if prof.version not in _PROMPT_CACHE:
+        _PROMPT_CACHE[prof.version] = (
+            _PROMPT_HEAD + _render_threshold_desc(prof) + _PROMPT_TAIL
+        )
+    return _PROMPT_CACHE[prof.version]
+
+
+# 兼容旧引用（import 时按当前版本渲染；热换档案请改用 render_synthesizer_prompt）
+SYNTHESIZER_PROMPT = render_synthesizer_prompt()
 
 
 # 两阶段流式 Phase 2 追加指令块：只生成面向用户的纯文本回答，不输出 JSON。

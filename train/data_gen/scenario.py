@@ -6,20 +6,30 @@
   SFT:   seed in [0, 100_000)
   GRPO:  seed in [100_000, 200_000)
   EVAL:  seed in [200_000, 300_000)
+
+外置化改造（2026-09-14）：档位区间与站点表不再硬编码复制，由
+config/thresholds.json 推导（唯一数值来源）——I 档上限 = f1×1.3、
+II/III 档上限 = 下一档阈值-1（防扰动跨档），数值与旧硬编码逐位一致。
+数据生成为离线确定性流程：import 时取档案快照，进程内不随热换档案
+变化（重跑进程即用新档）。
 """
 import random
 from dataclasses import dataclass, field
 
+from agent.thresholds import get_thresholds
+
 STATIONS = ["吴堡", "龙门", "府谷"]
-STATION_BASE_LEVEL = {"吴堡": 640.5, "龙门": 382.3, "府谷": 810.2}
+# 站点基准水位（档案快照，mock 警戒/保证线同源）
+_PROFILE = get_thresholds()
+STATION_BASE_LEVEL = {
+    name: float(p["base_level_m"]) for name, p in _PROFILE.stations.items()
+}
 QUERY_TYPES = ["single_tool", "multi_tool", "plan_only"]
 PERSONAS = ["防汛值班员", "乡镇干部", "沿河企业负责人"]
 
+# 档位区间由阈值档案推导（勿手改——改 config/thresholds.json）
 _LEVEL_TO_FLOW_RANGE = {
-    "I": (5000.0, 6500.0),
-    "II": (3000.0, 4999.0),
-    "III": (2000.0, 2999.0),
-    "IV": (500.0, 1999.0),
+    level: _PROFILE.flow_range_for(level) for level in ("I", "II", "III", "IV")
 }
 
 _QUERY_TEMPLATES = {
@@ -44,12 +54,16 @@ class Scenario:
 
 
 def _make_overrides(rng: random.Random, station: str, level: str) -> dict:
-    """按等级档位生成各工具 mock 覆盖值（同 rng 保证确定性）。"""
+    """按等级档位生成各工具 mock 覆盖值（同 rng 保证确定性）。
+
+    警戒/保证线取站点档案绝对值（与旧 base+2.0/+3.5 偏移结果一致）。
+    """
     lo, hi = _LEVEL_TO_FLOW_RANGE[level]
     flow = round(rng.uniform(lo, hi), 1)
-    base_level = STATION_BASE_LEVEL[station]
-    warn = round(base_level + 2.0, 2)
-    guar = round(base_level + 3.5, 2)
+    st = _PROFILE.station(station)
+    base_level = st["base_level_m"]
+    warn = round(float(st["warning_level_m"]), 2)
+    guar = round(float(st["guaranteed_level_m"]), 2)
     # 水位状态与等级对齐：I 级超保证，II 级超警戒，III/IV 正常
     if level == "I":
         water_level = round(guar + rng.uniform(0.0, 0.5), 2)
@@ -57,7 +71,7 @@ def _make_overrides(rng: random.Random, station: str, level: str) -> dict:
         water_level = round(warn + rng.uniform(0.0, 0.4), 2)
     else:
         water_level = round(base_level + rng.uniform(-0.3, 0.5), 2)
-    rain = {"I": 120.0, "II": 75.0, "III": 30.0, "IV": 8.0}[level]
+    rain = _PROFILE.rain_for_level(level)
     # peak 取 flow 的 1.0-1.1 倍但不越过本档上限 hi，防止跨档改变等级真值
     # （如 II 档 flow=4900 × 1.15 = 5635 ≥ 5000 会被规则引擎误判为 I 级）
     peak = round(min(flow * rng.uniform(1.0, 1.1), hi), 1)

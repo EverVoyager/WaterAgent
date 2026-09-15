@@ -27,11 +27,9 @@ from agent.prompts import (
 from agent.prompts import (
     SYNTH_ANSWER_ADDENDUM as _SYNTH_ANSWER_ADDENDUM,
 )
-from agent.prompts import (
-    SYNTHESIZER_PROMPT,
-)
 from agent.prompts.synthesizer import SYNTH_META_SCHEMA as _SYNTH_META_SCHEMA
 from agent.prompts.synthesizer import SYNTH_RESPONSE_SCHEMA as _SYNTH_RESPONSE_SCHEMA
+from agent.prompts.synthesizer import render_synthesizer_prompt
 from agent.utils import (
     WARNING_THRESHOLDS,
     CitationMarkerFilter,
@@ -307,7 +305,8 @@ def _build_synth_system_content(
         experiences: planner round-1 检索的历史经验（方案 A 作答端注入）。
             两阶段必须传同一份，否则 Phase 2 system 与 Phase 1 前缀错位
     """
-    system_content = SYNTHESIZER_PROMPT
+    # 运行时渲染（阈值档案版本内缓存）——热换档案后无需重启即生效
+    system_content = render_synthesizer_prompt()
 
     # 注入已启用 Skill 元信息（name + description）作为上下文
     try:
