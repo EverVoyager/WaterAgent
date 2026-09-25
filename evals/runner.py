@@ -170,6 +170,7 @@ def _evaluate_case(case, result: dict) -> dict:
         "query": case.query,
         "predicted_level": predicted_level,
         "expected_level": case.expected_level,
+        "expected_intent": case.expected_intent,
         "claimed_level": case.claimed_level,
         "intent": intent,
         "tool_sequence": tool_sequence,
@@ -233,6 +234,7 @@ def run_case(case, model_label: str = "") -> dict:
         record["error"] = f"{type(e).__name__}: {e}"
         record["predicted_level"] = ""
         record["expected_level"] = case.expected_level
+        record["expected_intent"] = case.expected_intent
         record["claimed_level"] = case.claimed_level
         record["intent"] = ""
         record["tool_sequence"] = []

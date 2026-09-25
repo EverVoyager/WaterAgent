@@ -41,6 +41,7 @@ _METRIC_NAMES = {
     "trap_resisted": "陷阱抵抗率",
     "needle_found": "针保留率（答案含关键事实）",
 }
+_INTENT_NAMES = {"agent_task": "业务任务", "chitchat": "闲聊"}
 
 
 def _fmt_rate(entry: dict | None) -> str:
@@ -86,6 +87,45 @@ def _failures_section(records: list[dict], max_items: int = 12) -> list[str]:
 
 def _rung(level: str) -> str:
     return {"I": "Ⅰ级", "II": "Ⅱ级", "III": "Ⅲ级", "IV": "Ⅳ级"}.get(level, level or "—")
+
+
+_INTENT_NAMES = {"agent_task": "业务任务", "chitchat": "闲聊"}
+
+
+def _intent_name(label: str) -> str:
+    return _INTENT_NAMES.get(label, label)
+
+
+def render_intent_confusion(confusion: dict | None) -> list[str]:
+    """意图混淆矩阵段：expected × predicted 计数 + 分类型误判明细。"""
+    lines: list[str] = []
+    if not confusion:
+        return lines
+    labels = confusion.get("labels", [])
+    lines.append("## 意图混淆矩阵（期望 × 预测）")
+    lines.append("")
+    header = " | ".join(_intent_name(p) for p in labels)
+    lines.append(f"| 期望 \\ 预测 | {header} |")
+    lines.append("|---|" + "---|" * len(labels))
+    for e in labels:
+        row = " | ".join(str(confusion["matrix"][e][p]) for p in labels)
+        lines.append(f"| {_intent_name(e)} | {row} |")
+    lines.append("")
+    mis_by_type = confusion.get("mis_by_type") or {}
+    if mis_by_type:
+        lines.append(f"误判 {confusion.get('n_misclassified', 0)} 条，按类型分布：")
+        lines.append("")
+        for ctype, items in sorted(mis_by_type.items()):
+            detail = "、".join(
+                f"{m['case_id']}（{_intent_name(m['expected'])}→{_intent_name(m['predicted'])}）"
+                for m in items
+            )
+            lines.append(f"- {_TYPE_NAMES.get(ctype, ctype)}：{detail}")
+        lines.append("")
+    else:
+        lines.append("无误判。")
+        lines.append("")
+    return lines
 
 
 # ====== 量化声明表（experiments 结果 → 可对外引用的声明行） ======
@@ -301,6 +341,9 @@ def render_report(
                 "citation_ok", "trap_resisted", "needle_found"):
         ap(_fmt_metric_row(metrics, key))
     ap("")
+
+    # 意图混淆矩阵（intent_ok 的"错在哪"下钻）
+    lines.extend(render_intent_confusion(metrics.get("intent_confusion")))
 
     # 分类型
     ap("## 分类型通过率")

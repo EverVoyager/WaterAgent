@@ -18,6 +18,7 @@ from evals import cases as cases_mod
 from evals import judge as judge_mod
 from evals import metrics as metrics_mod
 from evals import regression as regression_mod
+from evals import report as report_mod
 from evals import runner as runner_mod
 from evals.cases import EVAL_SEED_BASE, EvalCase, assert_seed_isolation, build_cases
 
@@ -125,8 +126,9 @@ class TestCases:
         cases = build_cases()
         types = {c.case_type for c in cases}
         assert types == {"business", "chitchat", "regulation", "web_search", "trap"}
-        assert len([c for c in cases if c.case_type == "business"]) == 30
-        assert len(cases) == 62
+        # 2026-09-15 起 30 轮换 + 1 固定口语预案用例（biz-030）
+        assert len([c for c in cases if c.case_type == "business"]) == 31
+        assert len(cases) == 63
 
     def test_build_cases_deterministic(self):
         c1 = build_cases(seed=EVAL_SEED_BASE)
@@ -524,6 +526,70 @@ class TestJudge:
         ])
         assert "series" not in text
         assert "75.0" in text
+
+
+# ============ 意图混淆矩阵 ============
+
+class TestIntentConfusion:
+    """intent_ok 只答对错；混淆矩阵回答"错在哪、哪类用例在错"。"""
+
+    @staticmethod
+    def _rec(cid, ctype, expected, predicted):
+        return {"case_id": cid, "case_type": ctype,
+                "expected_intent": expected, "intent": predicted}
+
+    def test_matrix_counts_and_misclassification(self):
+        records = [
+            self._rec("a", "business", "agent_task", "agent_task"),
+            self._rec("b", "business", "agent_task", "chitchat"),
+            self._rec("c", "chitchat", "chitchat", "chitchat"),
+            self._rec("d", "trap", "agent_task", "chitchat"),
+        ]
+        conf = metrics_mod.intent_confusion(records)
+        assert conf["n"] == 4
+        assert conf["matrix"]["agent_task"]["chitchat"] == 2
+        assert conf["matrix"]["agent_task"]["agent_task"] == 1
+        assert conf["n_misclassified"] == 2
+        assert set(conf["mis_by_type"]) == {"business", "trap"}
+        assert [m["case_id"] for m in conf["mis_by_type"]["business"]] == ["b"]
+
+    def test_missing_expected_falls_back_to_registry(self):
+        """旧格式记录（无 expected_intent）按 case_id 回查用例注册表。"""
+        real = build_cases(seed=EVAL_SEED_BASE)
+        case = next(c for c in real if c.expected_intent == "chitchat")
+        conf = metrics_mod.intent_confusion([
+            {"case_id": case.case_id, "case_type": case.case_type,
+             "intent": "chitchat"},
+        ])
+        assert conf is not None
+        assert conf["matrix"]["chitchat"]["chitchat"] == 1
+
+    def test_no_intent_returns_none(self):
+        assert metrics_mod.intent_confusion([]) is None
+        assert metrics_mod.intent_confusion(
+            [{"case_id": "x", "case_type": "t", "intent": ""}]) is None
+
+    def test_compute_metrics_includes_confusion(self):
+        records = [dict(self._rec("a", "business", "agent_task", "chitchat"),
+                        checks={}, passed=False, capabilities=[])]
+        m = metrics_mod.compute_metrics(records)
+        assert m["intent_confusion"]["n_misclassified"] == 1
+
+    def test_report_renders_confusion_section(self):
+        records = [
+            self._rec("biz-1", "business", "agent_task", "chitchat"),
+            self._rec("chat-1", "chitchat", "chitchat", "chitchat"),
+        ]
+        lines = report_mod.render_intent_confusion(
+            metrics_mod.intent_confusion(records))
+        text = "\n".join(lines)
+        assert "意图混淆矩阵" in text
+        assert "业务任务" in text and "闲聊" in text
+        assert "biz-1" in text  # 误判用例 ID 出现在明细里
+        assert "无误判" not in text
+
+    def test_report_confusion_none_renders_empty(self):
+        assert report_mod.render_intent_confusion(None) == []
 
 
 # ============ 记忆消融 patch ============

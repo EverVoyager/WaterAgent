@@ -6,7 +6,9 @@ docs/context-compression-research.md）：
 2. 未超预算 → 直接返回原 history（不调 LLM，零开销）
 3. 超预算 → 交给 session_archive.compact_with_segments：
    早段折叠为冻结的结构化摘要消息（每段一条，含"续摘要"追加），
-   近 N 轮原文保留；全文（含工具数据）落 MD 归档，按需匹配还原。
+   近 N 轮原文保留；全文（含工具数据）落 MD 归档，摘要内标注存档
+   文件名，由 planner 调 read_session_archive 工具按需读取
+   （Claude Code 式"摘要 + 磁盘指针"还原，替代逐请求向量匹配）。
 
 冻结摘要跨请求逐字一致（KV Cache 前缀稳定），摘要 LLM 失败时降级
 规则提取（不冻结），embedding 不可用时整体降级单段。
@@ -47,8 +49,8 @@ def is_compacted_history(history: list[dict[str, Any]]) -> bool:
 
 def compact_history(
     history: list[dict[str, Any]],
-    max_tokens: int = 4000,
-    keep_recent_rounds: int = 2,
+    max_tokens: int = 65536,
+    keep_recent_rounds: int = 4,
 ) -> list[dict[str, Any]]:
     """压缩历史对话，控制在 token 预算内。
 
@@ -100,3 +102,23 @@ def extract_history_context(history: list[dict[str, Any]]) -> str:
             parts.append(f"{label}：{content}")
 
     return "\n\n".join(parts)
+
+
+def history_view_for_llm(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """LLM 节点（direct_chat / planner）应喂入的 history 视窗。
+
+    - 已压缩 → 全量（摘要 + 近窗整体受预算控制）
+    - 未压缩且估算 token 在预算内 → 全量（预算按 HISTORY_MAX_TOKENS 校准，
+      历史全量可见优于盲切近 3 轮）
+    - 未压缩但超预算（防御：调用方未过 compact 入口）→ 截最近 3 轮
+    """
+    if not history:
+        return history
+    if is_compacted_history(history):
+        return history
+    from app.core.config import get_settings
+
+    total = sum(estimate_tokens(m.get("content", "")) for m in history)
+    if total <= get_settings().HISTORY_MAX_TOKENS:
+        return history
+    return history[-6:]
