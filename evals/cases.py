@@ -422,9 +422,8 @@ def _make_long_history(rng: random.Random, station: str, warning_level_value: st
     # 填充轮：主题循环，每轮附一段时段快报（数值 seed 确定性）。
     # 轮数按当前 HISTORY_MAX_TOKENS 动态填充至超预算 ~8%（coverage.py 断言
     # 守门：历史不超预算压缩不会触发；预算随模型窗口调整时用例自动跟随）
-    from app.core.config import get_settings
-
     from agent.graph.context_compact import estimate_tokens
+    from app.core.config import get_settings
 
     budget = get_settings().HISTORY_MAX_TOKENS
     i = 0

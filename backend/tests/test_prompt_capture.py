@@ -7,8 +7,8 @@ tools 在前（对齐服务端渲染顺序：工具 schema 属于系统区）后
 """
 import json
 
-from evals.experiments.prompt_capture import serialize_request
 from evals.experiments.prefix_reuse_ratio import _normalize
+from evals.experiments.prompt_capture import serialize_request
 
 
 def _req(tools, messages):
