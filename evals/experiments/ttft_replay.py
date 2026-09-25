@@ -33,7 +33,8 @@ _PLANNER_MARK = "工具调用规划模块"
 
 
 def _load(path: Path) -> list[dict]:
-    records = [json.loads(l) for l in open(path, encoding="utf-8") if l.strip()]
+    with open(path, encoding="utf-8") as f:
+        records = [json.loads(line) for line in f if line.strip()]
     if not records:
         raise ValueError(f"{path}: 空文件")
     return records
@@ -81,7 +82,7 @@ def _arm(client, model, records, broken: bool) -> list[float]:
     label = "broken" if broken else "frozen"
     for pass_i in ("warmup", "measured"):
         ttfts = []
-        for i, rec in enumerate(records):
+        for rec in records:
             nonce = f"{time.time_ns()}" if (broken and pass_i == "measured") else (
                 "warmup-fixed" if broken else None)
             t = _replay(client, model, rec, nonce)
