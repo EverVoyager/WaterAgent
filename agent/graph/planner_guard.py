@@ -15,6 +15,7 @@ import logging
 import re
 from typing import Any
 
+from agent.intent_rules import get_intent_rules
 from agent.tools.schemas import TOOL_PARAM_MODELS
 
 logger = logging.getLogger(__name__)
@@ -48,13 +49,11 @@ _CLAIM_CUE_RE = re.compile(
 )
 _STATION_RE = re.compile(r"(吴堡|龙门|府谷)")
 
-# 预案生成请求："生成/制定/编制/输出/安排 …… 预案/应急方案"
-_PLAN_REQUEST_RE = re.compile(
-    r"(生成|制定|编制|输出|安排)[^。？！?!\n]{0,15}"
-    r"(应急预案|应急响应方案|处置预案|处置方案|应急方案|转移方案|预案)",
-)
-# 研判请求：需要实时水情 + 降雨两个数据源
-_ASSESS_RE = re.compile(r"研判|防汛形势|洪水风险|防汛压力|风险评[估判]|综合评[估判]")
+# 预案/研判意图正则自 2026-09-15 起外置到 config/intent_rules.json
+# （agent/intent_rules.py 加载，missing_required_tools 运行时经
+# get_intent_rules() 读取，改配置即生效）。外置动因：口语措辞
+# （"提几条处置建议"）不在词表内导致完成度闸漏触发、请求被路由进闲聊
+# （kv-cache 实验 dump 逐字节 diff 定位）——此后加词改配置，不改代码。
 
 _LEVEL_CN_TO_CODE = {"Ⅰ": "I", "Ⅱ": "II", "Ⅲ": "III", "Ⅳ": "IV",
                      "1": "I", "2": "II", "3": "III", "4": "IV",
@@ -204,8 +203,14 @@ def missing_required_tools(
     - 研判请求：实时水情（get_hydrology）与降雨（get_weather）缺一补一
     """
     calls: list[dict[str, Any]] = []
+    rules = get_intent_rules()
 
-    if _PLAN_REQUEST_RE.search(query) and "generate_plan" not in called_names:
+    # 概念抑制：动词+名词都命中但用户在问概念（"列出应急预案的组成部分"）
+    # 时不触发预案闸——那是要解释，不是要一份预案
+    concept_asked = bool(rules.concept_re and rules.concept_re.search(query))
+
+    if (rules.plan_request_re.search(query) and not concept_asked
+            and "generate_plan" not in called_names):
         level = ""
         if tool_results:
             level, _ = _compute_level(tool_results)
@@ -223,7 +228,7 @@ def missing_required_tools(
             "source": "completeness",
         })
 
-    if _ASSESS_RE.search(query):
+    if rules.assess_re.search(query):
         station = _station_of(query)
         if "get_hydrology" not in called_names:
             calls.append({

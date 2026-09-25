@@ -260,6 +260,82 @@ class TestCompactWithSegments:
         history = _round_history(("你好", "你好！"), ("在吗", "在的"))
         assert compact_history(history) is history
 
+    def test_summary_carries_archive_pointer(self, archive_env):
+        """摘要末尾标注存档文件名（Claude Code 式摘要+磁盘指针），
+        且指向的文件在压缩返回前已同步落盘（read 工具依赖）。"""
+        counter = {"n": 0}
+        history = self._long_history()
+        with patch("app.core.llm.get_llm_client", _mock_summary_llm(counter)):
+            out = sa.compact_with_segments(history, keep_recent_rounds=2)
+        summary_msgs = [m for m in out if m["role"] == "system"]
+        assert summary_msgs, "应产出段摘要"
+        import re
+        for m in summary_msgs:
+            assert "[存档]" in m["content"]
+            assert "read_session_archive" in m["content"]
+            match = re.search(r"\[存档\] 全文与工具数据存于 ([0-9a-f]{16}\.md)", m["content"])
+            assert match, f"指针应含合法文件名：{m['content'][-80:]}"
+            assert (archive_env / match.group(1)).exists(), "指针文件必须已落盘"
+
+    def test_pointer_deterministic_across_calls(self, archive_env):
+        """指针由 first_fp 推导：同 history 两次压缩，指针逐字一致
+        （KV Cache 前缀稳定不变量对指针同样成立）。"""
+        counter = {"n": 0}
+        history = self._long_history()
+        with patch("app.core.llm.get_llm_client", _mock_summary_llm(counter)):
+            out1 = sa.compact_with_segments(history, keep_recent_rounds=2)
+            out2 = sa.compact_with_segments(history, keep_recent_rounds=2)
+        s1 = [m["content"] for m in out1 if m["role"] == "system"]
+        s2 = [m["content"] for m in out2 if m["role"] == "system"]
+        assert s1 == s2 and all("[存档]" in c for c in s1)
+
+
+# ============ 存档读取（read_session_archive 底层） ============
+
+class TestReadArchiveFile:
+    def _make_archive(self, archive_env, query="吴堡站水情如何", answer="流量 537") -> str:
+        rounds = sa.extract_rounds(_round_history((query, answer)))
+        seg = sa.Segment(rounds=rounds)
+        sa.archive_rounds([seg])
+        return f"{seg.first_fp}.md"
+
+    def test_read_returns_body_without_frontmatter(self, archive_env):
+        filename = self._make_archive(archive_env)
+        result = sa.read_archive_file(filename)
+        assert result["file"] == filename
+        assert "流量 537" in result["content"]
+        assert "meta:" not in result["content"]      # frontmatter 剥离
+        assert result["truncated"] is False
+        assert result["total_chars"] == len(result["content"])
+
+    def test_rejects_illegal_filename(self, archive_env):
+        for bad in ("../evil.md", "foo.md", "abc", "", "0123456789abcdef.md.exe",
+                    "/tmp/x.md", "..\\..\\x.md"):
+            with pytest.raises(ValueError):
+                sa.read_archive_file(bad)
+
+    def test_missing_file_raises(self, archive_env):
+        with pytest.raises(FileNotFoundError):
+            sa.read_archive_file("0123456789abcdef.md")
+
+    def test_long_content_truncated(self, archive_env):
+        filename = self._make_archive(
+            archive_env, answer="水位数据。" * 5000)  # 远超 8000 字符
+        result = sa.read_archive_file(filename)
+        assert result["truncated"] is True
+        assert len(result["content"]) == sa.ARCHIVE_READ_MAX_CHARS
+        assert result["total_chars"] > sa.ARCHIVE_READ_MAX_CHARS
+
+    def test_real_executor_tool_roundtrip(self, archive_env):
+        """read_session_archive 工具（real_executor 透传层）返回结构过闸。"""
+        from agent.tools.schemas import validate_tool_result
+
+        filename = self._make_archive(archive_env, answer="流量 537，水位 636.06")
+        from agent.tools.real_executor import real_execute_tool
+        result = real_execute_tool("read_session_archive", {"file": filename})
+        assert validate_tool_result("read_session_archive", result) == ""
+        assert result["source"] == "session_archive"
+
 
 # ============ 按需还原 ============
 

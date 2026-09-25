@@ -52,15 +52,20 @@ def _compact_history_entry(history: list[dict[str, Any]]) -> list[dict[str, Any]
 
 
 def _recall_context_entry(user_query: str, raw_history: list[dict[str, Any]]) -> str:
-    """入口按需还原：query 与压缩窗口外的早段匹配，命中段全文注入。
+    """入口按需还原（旧机制，SESSION_RECALL_ON_QUERY 控制，默认关闭）。
 
-    返回空串表示无命中（embedding 不可用/无相关段）。异常全部吞掉，
-    绝不影响主流程。
+    主还原路径已改为 Claude Code 式"摘要 + 磁盘指针"：压缩产出的段摘要
+    末尾标注存档文件名，planner 需要细节时调用 read_session_archive 工具
+    读取——零逐请求 embedding 比较成本，按需付 token。
+    置 True 恢复 query-段向量匹配自动注入（对照实验用）。
+    返回空串表示无命中或机制关闭。异常全部吞掉，绝不影响主流程。
     """
     try:
+        settings = get_settings()
+        if not settings.SESSION_RECALL_ON_QUERY:
+            return ""
         from agent.memory.session_archive import recall_relevant_segments
 
-        settings = get_settings()
         return recall_relevant_segments(
             user_query, raw_history, settings.HISTORY_KEEP_RECENT_ROUNDS,
         )

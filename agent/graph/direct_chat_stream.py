@@ -74,10 +74,11 @@ def _direct_chat_stream(
         )
 
     messages = [{"role": "system", "content": system_content}]
-    # 压缩过的 history（含早段摘要 system 消息）整体已受 token 预算控制，
-    # 全量使用；未压缩的 history 截断到最近 3 轮（6 条）避免 token 超限
-    from agent.graph.context_compact import is_compacted_history
-    history_slice = history if is_compacted_history(history) else history[-6:]
+    # 压缩过的 history（含早段摘要 system 消息）整体已受 token 预算控制；
+    # 未压缩的 history 在预算内同样全量（预算见 HISTORY_MAX_TOKENS），
+    # 仅超预算的防御路径截最近 3 轮
+    from agent.graph.context_compact import history_view_for_llm
+    history_slice = history_view_for_llm(history)
     for m in history_slice:
         messages.append({"role": m.get("role", "user"), "content": m.get("content", "")})
     # 历史经验注入（方案 A）：user 消息尾部动态区，system 前缀不动

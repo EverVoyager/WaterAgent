@@ -168,9 +168,10 @@ class TestRunToggleAblation:
 
 class TestNewCaseTypes:
     def test_default_composition_unchanged(self):
-        """默认 62 条不变——基线可比性（回归门禁组合一致性）。"""
+        """默认 63 条（2026-09-15 起：62 + 口语预案用例 biz-030 固定追加，
+        见 build_cases 注释；改动即"新实验"，重跑评估后重建基线）。"""
         cases = build_cases()
-        assert len(cases) == 62
+        assert len(cases) == 63
         assert not any(c.case_type in ("memory", "compression", "tool_edge")
                        for c in cases)
 
@@ -523,11 +524,11 @@ class TestKvCacheExperiment:
         def fake_run_script(station, model_label=""):
             from app.core.llm_stats import record_llm_usage
             reset_cache_stats()
-            # 冻结版高命中；破坏版零命中（由 settings 探测区分不可行——
-            # 直接按调用次序：第 1 遍冻结、第 2 遍破坏）
+            # 稳态口径：每臂计量前空跑一遍预热——调用次序为
+            # 冻结预热 → 冻结计量 → 破坏预热 → 破坏计量（预热不计入）
             calls = fake_run_script.calls
             fake_run_script.calls += 1
-            hit = 90 if calls == 0 else 0
+            hit = 90 if calls in (1,) else 0  # 仅冻结臂计量轮命中
             record_llm_usage("planner", {
                 "prompt_tokens": 100,
                 "prompt_tokens_details": {"cached_tokens": hit},
@@ -537,9 +538,38 @@ class TestKvCacheExperiment:
         with patch.object(kv_exp, "_run_session_script",
                           side_effect=fake_run_script):
             result = kv_exp.run_kv_cache_experiment()
+        assert fake_run_script.calls == 4  # 两臂 × (预热 + 计量)
+        assert result["warmup"] is True
+        assert result["session_rounds"] == 6
         assert result["planner_hit_frozen"] == pytest.approx(0.9)
         assert result["planner_hit_broken"] == 0.0
         assert result["planner_hit_delta"] == pytest.approx(0.9)
+        reset_cache_stats()
+
+    def test_run_experiment_cold_mode_without_warmup(self, monkeypatch):
+        from app.core.llm_stats import reset_cache_stats
+        from evals.experiments import kv_cache as kv_exp
+
+        def fake_run_script(station, model_label=""):
+            from app.core.llm_stats import record_llm_usage
+            reset_cache_stats()
+            calls = fake_run_script.calls
+            fake_run_script.calls += 1
+            hit = 90 if calls == 0 else 0  # 冷口径：第 1 遍冻结、第 2 遍破坏
+            record_llm_usage("planner", {
+                "prompt_tokens": 100,
+                "prompt_tokens_details": {"cached_tokens": hit},
+            })
+        fake_run_script.calls = 0
+
+        monkeypatch.setenv("KV_CACHE_WARMUP", "0")
+        with patch.object(kv_exp, "_run_session_script",
+                          side_effect=fake_run_script):
+            result = kv_exp.run_kv_cache_experiment()
+        assert fake_run_script.calls == 2
+        assert result["warmup"] is False
+        assert result["planner_hit_frozen"] == pytest.approx(0.9)
+        assert result["planner_hit_broken"] == 0.0
         reset_cache_stats()
 
 

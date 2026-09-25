@@ -111,10 +111,11 @@ def direct_chat_node(state: AgentState) -> dict[str, Any]:
         )
 
     messages = [{"role": "system", "content": system_content}]
-    # 压缩过的 history（含早段摘要 system 消息）整体已受 token 预算控制，
-    # 全量使用；未压缩的 history 截断到最近 3 轮（6 条）避免 token 超限
-    from agent.graph.context_compact import is_compacted_history
-    history_slice = history if is_compacted_history(history) else history[-6:]
+    # 压缩过的 history（含早段摘要 system 消息）整体已受 token 预算控制；
+    # 未压缩的 history 在预算内同样全量（预算见 HISTORY_MAX_TOKENS），
+    # 仅超预算的防御路径截最近 3 轮
+    from agent.graph.context_compact import history_view_for_llm
+    history_slice = history_view_for_llm(history)
     for m in history_slice:
         messages.append({"role": m.get("role", "user"), "content": m.get("content", "")})
     # 历史经验注入（方案 A：planner round-1 检索入 state，作答端消费——
@@ -415,8 +416,14 @@ def _build_planner_system_prompt() -> str:
         "并在结论中指出与用户声称不一致之处。\n"
         "9. 工具组合策略：研判防汛形势/风险/压力类问题，至少同时调用 "
         "get_hydrology（实时水情）与 get_weather（降雨预报），需要趋势时加 "
-        "predict_runoff；生成应急预案必须调用 generate_plan 工具，"
-        "由其返回结构化处置行动，严禁用文本自行编写预案。\n"
+        "predict_runoff。\n"
+        "   预案与处置原则（按意图判断，不按措辞）：只要用户要的是"
+        "\"针对当下汛情该怎么办\"的产出——无论叫预案、方案、措施还是建议"
+        "（如'提几条处置建议''给点应对措施''接下来该怎么处理'）——"
+        "都必须先调用数据工具定级，再调用 generate_plan 工具出结构化预案，"
+        "严禁用文本自行编写预案，也严禁把这类请求当闲聊或概念解释直接回答。\n"
+        "   反例：'处置预案一般包括哪些内容''应急预案分几类'是在问概念，"
+        "按第 1 条直接解释，不调工具；二者区别看用户要不要你'替他定行动'。\n"
         "10. 联网检索类问题：用户要求搜索最新新闻、通知、通报、汛情动态等"
         "外部信息（如'搜一下''网上查查''最近的报道/消息'）时，必须调用 "
         "web_search 工具获取网页来源，不得用内部数据工具（get_hydrology 等）"
@@ -425,6 +432,12 @@ def _build_planner_system_prompt() -> str:
         "11. list_skills 是技能清单元工具，仅当用户明确询问你的技能/能力/工具"
         "清单时才调用；信息不足或犹豫时不得把它当默认动作——应选择最相关的"
         "业务工具，或在收集必要数据后返回空工具列表结束规划。\n"
+        "12. 历史任务段摘要（以'[历史任务·N]'开头）末尾的 [存档] 行标注了"
+        "该段全文的存档文件名。当用户追问早前任务的细节、而摘要中的"
+        "关键数据/结论不足以回答时，用该文件名调用 read_session_archive"
+        "读取完整原文（含当时的工具数据与预警等级），再据其作答；"
+        "摘要已足够、或当前问题与历史任务无关时，不要调用该工具。"
+        "严禁读取上下文中未出现过的存档文件名。\n"
     )
     # 长期记忆常驻注入（用户手册 + Agent 自动积累，双层文件）
     try:
@@ -515,12 +528,15 @@ def _plan_via_fc(
     settings = get_llm_config()
     client = get_llm_client().with_options(timeout=LLM_TIMEOUTS["planner"])
     # Skill 工具子集过滤：空列表或 None = 全部工具。
-    # list_skills 是元工具（对标 MCP tools/list），不受技能工具子集隔离限制，
-    # 始终保留在 schema 中——否则 system prompt 广告了它而 schema 里没有，
+    # list_skills / read_session_archive 是元工具（对标 MCP tools/list 与
+    # 记忆还原通道），不受技能工具子集隔离限制，始终保留在 schema 中——
+    # 否则 system prompt 广告了它们而 schema 里没有，
     # LLM 按提示调用会抛 "Unknown tool"，被反思模块误记为"工具失败教训"
     effective_tool_names = skill_tool_names or None
-    if effective_tool_names and "list_skills" not in effective_tool_names:
-        effective_tool_names = [*effective_tool_names, "list_skills"]
+    if effective_tool_names:
+        for meta_tool in ("list_skills", "read_session_archive"):
+            if meta_tool not in effective_tool_names:
+                effective_tool_names = [*effective_tool_names, meta_tool]
     tools_schema = build_openai_tools(tool_names=effective_tool_names)
 
     try:
@@ -614,6 +630,17 @@ def _execute_one_tool(
         logger.exception("[executor] tool failed: %s", name)
         result = {}
         error = str(e)
+
+    # 返回值出口闸：schema 违规按工具失败处理（fail-fast），不让坏数据
+    # 进入 tool_results——下游规则引擎/跨工具注入按 key 直读，字段漂移
+    # 与其 KeyError 或静默算错，不如在边界拦截后交给 planner 重规划。
+    if not error:
+        from agent.tools.schemas import validate_tool_result
+        violation = validate_tool_result(name, result)
+        if violation:
+            logger.warning("[executor] 工具返回值校验失败 %s: %s", name, violation)
+            error = f"result_schema: {violation}"
+            result = {}
 
     # 累积结果 key：跨轮同名（existing_keys）或本轮重复规划（duplicate_names）
     # 时加 idx 后缀，保证同轮多个同名工具调用结果不互相覆盖（对齐 OpenAI

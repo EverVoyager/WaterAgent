@@ -81,19 +81,38 @@ class Settings(BaseSettings):
     RATE_LIMIT_PER_MINUTE: int = 30
 
     # 上下文 token 压缩（借鉴 Codex compact.rs）
-    # history 总 token 超过此值时触发压缩
-    HISTORY_MAX_TOKENS: int = 4000
-    # 压缩时保留最近几轮原文（1 轮 = 1 问 1答 = 2 条消息）
-    HISTORY_KEEP_RECENT_ROUNDS: int = 2
+    # history 总 token 超过此值时触发压缩。
+    # 阈值依据（DeepSeek 现行模型 deepseek-flash / deepseek-v4-pro 上下文
+    # 均为 1M、最大输出 384K）：容量已不是约束，绑定约束是——
+    #   1) 成本与时延：planner→executor 每轮重灌 prompt，history 前缀
+    #      append-only 可吃上下文缓存，但 64K 以上的常驻历史在缓存未命
+    #      时 prefill 成本和 TTFT 明显上升；
+    #   2) 质量：lost-in-the-middle——长中段无关对话稀释 planner 注意力，
+    #      1M 窗口模型检索尚可、长上下文多跳推理仍会衰减。
+    # 取 64K（窗口的 ~6%）：常驻 prompt（history + 系统/工具 schema +
+    # 记忆注入 + 当轮工具结果 + 输出）峰值约 120K，远低于 1M 且 TTFT 友好；
+    # 宁可早压（摘要便宜）不要长历史硬扛（质量衰减不可恢复）。
+    # estimate_tokens 误差 ±20%，实际触发区间约 51K~77K。
+    HISTORY_MAX_TOKENS: int = 65536
+    # 压缩时保留最近几轮原文（1 轮 = 1 问 1答 = 2 条消息）。
+    # 64K 预算下近窗从 2 轮放宽到 4 轮：追问类问题通常落在最近几轮，
+    # 原文保留比摘要还原省一次工具往返
+    HISTORY_KEEP_RECENT_ROUNDS: int = 4
     # 会话任务段落盘与按需还原（Context-Folding 工程化，
     # 详见 docs/context-compression-research.md）：
     # 超预算时早段折叠为冻结的结构化摘要（KV Cache 前缀稳定），
-    # 全文（含工具数据）落 MD 文件，按 query-段匹配按需还原
+    # 全文（含工具数据）落 MD 文件；摘要内标注存档文件名，
+    # 由 planner 按需调用 read_session_archive 工具读取（Claude Code 式
+    # 摘要+磁盘指针），不再每请求做 query-段向量比较
     SESSION_ARCHIVE_ENABLED: bool = True
     SESSION_ARCHIVE_DIR: str = "session_archive"
     # 分段语义边界：相邻轮 query embedding 余弦低于阈值开新段
     SESSION_SEGMENT_SIM_THRESHOLD: float = 0.5
-    # 按需还原：query-段匹配余弦阈值 / 最多还原段数 / 归档保留天数
+    # 按需还原（旧机制，默认关闭）：每请求把 query 与全部早段做 embedding
+    # 匹配自动注入命中段全文。段数增多后比较成本线性增长，已改为
+    # "摘要标注存档路径 + LLM 调用 read_session_archive 主动读取"；
+    # 置 True 可恢复旧行为用于对照实验
+    SESSION_RECALL_ON_QUERY: bool = False
     SESSION_ARCHIVE_MATCH_THRESHOLD: float = 0.5
     SESSION_ARCHIVE_TOP_K: int = 2
     SESSION_ARCHIVE_MAX_AGE_DAYS: int = 30
