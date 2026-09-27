@@ -85,6 +85,9 @@ def compute_metrics(records: list[dict]) -> dict:
     for key in _CHECK_KEYS:
         metrics[key] = _rate(records, key)
 
+    # 意图混淆矩阵（intent_ok 只答对错，矩阵答"错在哪、哪类在错"）
+    metrics["intent_confusion"] = intent_confusion(records)
+
     # 分类型通过率（复杂度层次化：哪类用例拖了总分）
     by_type: dict[str, dict] = {}
     for ctype in {r["case_type"] for r in records}:
@@ -143,6 +146,72 @@ def metric_se(metrics: dict, key: str) -> float:
     if isinstance(entry, dict) and "se" in entry:
         return float(entry["se"])
     return 0.0
+
+
+# ====== 意图混淆矩阵 ======
+
+# 旧格式 history 记录缺 expected_intent 时按 case_id 回查用例注册表
+# （用例集确定性：同 seed 下 case_id → expected_intent 稳定）
+_EXPECTED_INTENT_INDEX: dict[str, str | None] | None = None
+
+
+def _lookup_expected_intent(case_id: str) -> str | None:
+    global _EXPECTED_INTENT_INDEX
+    if _EXPECTED_INTENT_INDEX is None:
+        try:
+            from evals.cases import EVAL_SEED_BASE, build_cases
+
+            _EXPECTED_INTENT_INDEX = {
+                c.case_id: c.expected_intent for c in build_cases(seed=EVAL_SEED_BASE)
+            }
+        except Exception:  # noqa: BLE001 - 回查失败只是少统计，不影响主流程
+            _EXPECTED_INTENT_INDEX = {}
+    return _EXPECTED_INTENT_INDEX.get(case_id)
+
+
+def intent_confusion(records: list[dict]) -> dict | None:
+    """意图混淆矩阵：expected × predicted 计数 + 分类型误判明细。
+
+    intent_ok 只回答"对没对"，本矩阵回答"错在哪、哪类用例在错"——
+    误判集中在 business→chitchat 说明预案/研判意图闸漏触发，
+    集中在 chitchat→agent_task 说明过度调用（讨好式查数据）。
+
+    记录缺 expected_intent（旧 history 格式）时按 case_id 回查注册表，
+    回查不到则该条不计入。无任何可统计记录时返回 None。
+    """
+    pairs: list[tuple[str, str, str, str]] = []  # (expected, predicted, case_id, case_type)
+    for r in records:
+        expected = r.get("expected_intent")
+        if expected is None:
+            expected = _lookup_expected_intent(r.get("case_id", ""))
+        predicted = r.get("intent") or ""
+        if not expected or not predicted:
+            continue
+        pairs.append((expected, predicted, r.get("case_id", ""), r.get("case_type", "")))
+    if not pairs:
+        return None
+
+    labels = sorted({e for e, _, _, _ in pairs} | {p for _, p, _, _ in pairs})
+    matrix = {e: {p: 0 for p in labels} for e in labels}
+    misclassified: list[dict] = []
+    for expected, predicted, case_id, case_type in pairs:
+        matrix[expected][predicted] += 1
+        if expected != predicted:
+            misclassified.append({
+                "case_id": case_id, "case_type": case_type,
+                "expected": expected, "predicted": predicted,
+            })
+    mis_by_type: dict[str, list[dict]] = {}
+    for m in misclassified:
+        mis_by_type.setdefault(m["case_type"], []).append(m)
+    return {
+        "n": len(pairs),
+        "labels": labels,
+        "matrix": matrix,
+        "n_misclassified": len(misclassified),
+        "misclassified": misclassified,
+        "mis_by_type": mis_by_type,
+    }
 
 
 def noise_band_note() -> str:

@@ -180,6 +180,29 @@ class TestMissingRequiredTools:
         )
         assert calls == []
 
+    def test_plan_request_colloquial(self):
+        """口语措辞必须触发预案闸（kv-cache dump diff 发现的漏网场景：
+        "提几条处置建议"曾因词表缺词被路由进闲聊）。"""
+        calls = missing_required_tools(
+            "给吴堡站当前的形势提几条处置建议。",
+            called_names=set(),
+            tool_results={},
+        )
+        assert [c["name"] for c in calls] == ["generate_plan"]
+        # query 无等级词，兜底取Ⅳ级
+        assert calls[0]["arguments"]["warning_level"] == "IV"
+
+    def test_concept_listing_suppressed(self):
+        """概念类问法抑制：动词+名词都命中但用户在问概念 → 不触发预案闸。
+        （加"列"动词后暴露的误伤面，config concept_suppress 兜住。）"""
+        for q in (
+            "帮我列一下应急预案的组成部分。",
+            "列出应急预案的组成部分。",
+            "应急处置方案包括哪些内容？",
+        ):
+            calls = missing_required_tools(q, called_names=set(), tool_results={})
+            assert calls == [], q
+
     def test_assess_missing_hydrology_and_weather(self):
         """评估 biz-001 失效场景：只调 weather+runoff 漏水情 → 补齐。"""
         calls = missing_required_tools(

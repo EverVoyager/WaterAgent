@@ -186,13 +186,18 @@ class TestDerivedConsumers:
         assert _LEVEL_TO_FLOW_RANGE["I"] == (5000.0, 6500.0)
 
     def test_eval_cases_unchanged_after_refactor(self):
-        """评估用例与外置化前逐位一致（默认 62 条 + 确定性）。"""
+        """评估用例确定性（同参两次构建逐位一致）。
+
+        默认 63 条 = 原 62 条 + 2026-09-15 新增的 1 条口语预案用例
+        （n_business_colloquial=1，"提几条处置建议"——intent_rules
+        外置化的回归用例，见 evals/cases.py）。
+        """
         from evals.cases import build_cases
 
         a = build_cases(n_memory=4)
         b = build_cases(n_memory=4)
         assert a == b
-        assert len(build_cases()) == 62
+        assert len(build_cases()) == 63
 
     def test_scenario_overrides_values_unchanged(self):
         """同 seed 的 overrides 与旧实现一致（档位/水位/降雨全对齐）。"""

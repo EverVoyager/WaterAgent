@@ -324,8 +324,10 @@ def replay_context(
         clear_replay_context()
 
 
-# list_skills 透传占位：无外部依赖，直接走 real_executor（不降级 mock）
-_PASSTHROUGH_TOOLS = {"list_skills"}
+# 透传工具（无外部依赖、读磁盘/内存即得）：直接走 real_executor，不降级 mock
+# - list_skills：技能清单元工具（对标 MCP tools/list）
+# - read_session_archive：历史任务段还原（读磁盘归档，mock 无法模拟用户历史）
+_PASSTHROUGH_TOOLS = {"list_skills", "read_session_archive"}
 
 
 _MOCK_IMPLEMENTATIONS = {

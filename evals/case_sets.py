@@ -10,11 +10,11 @@
 """
 from evals.cases import EVAL_SEED_BASE, build_cases
 
-# 显式清零：build_cases 的 62 条默认组合是回归基线口径，实验子集
+# 显式清零：build_cases 的默认组合是回归基线口径，实验子集
 # 只要自己声明的类型（漏清零会把默认用例混进来，破坏归因与成本控制）
 _ZEROS = {
-    "n_business": 0, "n_chitchat": 0, "n_regulation": 0,
-    "n_web_search": 0, "n_trap": 0,
+    "n_business": 0, "n_business_colloquial": 0, "n_chitchat": 0,
+    "n_regulation": 0, "n_web_search": 0, "n_trap": 0,
     "n_memory": 0, "n_compression": 0, "n_tool_edge": 0,
 }
 

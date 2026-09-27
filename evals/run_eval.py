@@ -4,7 +4,8 @@
     # 冒烟（8 条，确定性指标）
     python evals/run_eval.py --limit 8
 
-    # 全量（62 条：30 业务 + 10 闲聊 + 8 法规 + 8 联网 + 6 陷阱）
+    # 全量（63 条：31 业务（含口语预案 biz-030） + 10 闲聊 + 8 法规 + 8 联网 + 6 陷阱）
+    # 2026-09-15 起 62→63（改题目=新实验）：重跑后 --update-baseline 重建基线
     python evals/run_eval.py
 
     # 带 LLM Judge + 稳定性 pass^3 + 记忆消融

@@ -419,9 +419,15 @@ def _make_long_history(rng: random.Random, station: str, warning_level_value: st
             "研判时我会把这个作为重要背景考虑。"
         )},
     ]
-    # 填充轮：5 个主题循环 4 遍 = 20 轮，每轮附一段时段快报（数值 seed 确定性），
-    # 总量需超 HISTORY_MAX_TOKENS（coverage.py 断言守门，不足会被 CI 拦下）
-    for i in range(20):
+    # 填充轮：主题循环，每轮附一段时段快报（数值 seed 确定性）。
+    # 轮数按当前 HISTORY_MAX_TOKENS 动态填充至超预算 ~8%（coverage.py 断言
+    # 守门：历史不超预算压缩不会触发；预算随模型窗口调整时用例自动跟随）
+    from agent.graph.context_compact import estimate_tokens
+    from app.core.config import get_settings
+
+    budget = get_settings().HISTORY_MAX_TOKENS
+    i = 0
+    while sum(estimate_tokens(m.get("content", "")) for m in history) <= budget * 1.08:
         topic_q, topic_a = _FILLER_TOPICS[i % len(_FILLER_TOPICS)]
         hour = (8 + i) % 24
         bulletin = (
@@ -438,11 +444,12 @@ def _make_long_history(rng: random.Random, station: str, warning_level_value: st
             q1=q_low + i * 10,
             q2=q_high + i * 15,
         ) + bulletin})
+        i += 1
     return history
 
 
 def _make_compression_cases(n: int, rng: random.Random, base_seed: int) -> list[EvalCase]:
-    """压缩等价性用例：历史超 4000 token 预算、针埋早轮，末轮提问验针保留。"""
+    """压缩等价性用例：历史超 HISTORY_MAX_TOKENS 预算、针埋早轮，末轮提问验针保留。"""
     stations = list(STATIONS)
     cases: list[EvalCase] = []
     for i in range(n):
@@ -552,6 +559,7 @@ def _make_tool_edge_cases(n: int, rng: random.Random, base_seed: int) -> list[Ev
 
 def build_cases(
     n_business: int = 30,
+    n_business_colloquial: int = 1,
     n_chitchat: int = 10,
     n_regulation: int = 8,
     n_web_search: int = 8,
@@ -563,13 +571,37 @@ def build_cases(
 ) -> list[EvalCase]:
     """构建评估数据集（确定性：同参数生成结果完全一致）。
 
-    新三类默认 0 条：默认组合保持 62 条不变，确保与既有基线可比
-    （regression.py 的组合一致性检查），由 --experiment / 显式参数启用。
+    新三类默认 0 条：默认组合保持与既有基线可比（regression.py 的组合
+    一致性检查），由 --experiment / 显式参数启用。
+
+    n_business_colloquial：口语预案用例（"提几条处置建议"），2026-09-15
+    起默认 1 条固定追加（biz-030，不进 _BUSINESS_QUERIES 轮换池——保证
+    既有 biz-000~029 逐字节稳定）。实验组合经 _ZEROS 显式清零，不受影响。
     """
     assert_seed_isolation()
     rng = random.Random(seed)
     cases: list[EvalCase] = []
     cases += _make_business_cases(n_business, rng, seed + 1000)
+
+    # 口语预案用例：动因是 2026-09-15 kv-cache dump 逐字节 diff 发现该类
+    # 措辞不在完成度闸词表内、请求被路由进闲聊（词表已外置
+    # config/intent_rules.json，提示词规则 9 同步补意图原则）。
+    for j in range(max(0, n_business_colloquial)):
+        station = ("吴堡", "龙门", "府谷")[j % 3]
+        level = ("II", "III", "I")[j % 3]
+        cases.append(EvalCase(
+            case_id=f"biz-{n_business + j:03d}",
+            case_type="business",
+            query=f"给{station}站当前的形势提几条处置建议。",
+            seed=seed + 1000 + n_business + j,
+            overrides=_make_overrides(
+                random.Random(seed + 1000 + n_business + j), station, level),
+            required_tools=frozenset({"generate_plan"}),
+            allowed_tools=_DATA_OR_PLAN | _META_TOOLS,
+            expected_level=level,
+            capabilities=(CAP_LEVEL, CAP_TOOLS, CAP_INTENT),
+        ))
+
     cases += _make_trap_cases(n_trap, rng, seed + 2000)
 
     for i, q in enumerate(_CHITCHAT_QUERIES[:n_chitchat]):

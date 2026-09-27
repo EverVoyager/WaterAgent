@@ -7,9 +7,14 @@
   收尾归档补充工具数据（前端 history 不含、跨轮还原的关键增量）
 - 摘要：结构化字段（意图/结论/关键数据/工具），生成一次即冻结写盘，
   段追加新轮后生成"续摘要"追加为新条目
+- 还原（主路径，Claude Code 式"摘要 + 磁盘指针"）：摘要消息末尾标注
+  存档文件名，LLM 判断需要细节时调用 read_session_archive 工具读取
+  全文——零逐请求比较成本，按需付 token；query-段向量匹配注入
+  （recall_relevant_segments）保留为可选回退（SESSION_RECALL_ON_QUERY）
 
 KV Cache 三不变量（test_session_archive.py 锁定）：
 1. 摘要冻结：已注入上下文的摘要文本永不改写，续摘要只追加
+   （存档指针由 first_fp 推导、注入时拼接，同样逐字稳定）
 2. 摘要确定性靠文件固化：同段所有请求读同一份冻结文本，不在线重生成
 3. 段边界只增不变：边界由历史事实（已有轮次文本）决定，新轮次不改旧边界
 
@@ -366,11 +371,17 @@ def compact_with_segments(
 
     返回消息序列 [段摘要 system 消息...] + history[-keep_msgs:]。
     替换原 compact_history 的 LLM 合并摘要路径（有损且跨请求不稳定）。
+
+    摘要消息末尾标注存档文件名（Claude Code 式"摘要 + 磁盘指针"）：
+    LLM 在上下文中看到早段摘要相关但细节不足时，调用 read_session_archive
+    工具读取该段全文（含工具数据），替代逐请求的 query-段向量匹配还原。
+    指针文本由 first_fp 推导（确定性），冻结摘要本体不改写——KV Cache
+    前缀稳定不变量保持成立。
+
+    早段在产出摘要前同步归档：指针引用的文件必须已存在（读取工具依赖）。
     """
     rounds = extract_rounds(history)
     segments = segment_rounds(rounds)
-    # 异步入档（不阻塞；失败只影响按需还原与工具数据保留）
-    _archive_async(segments)
 
     keep_msgs = keep_recent_rounds * 2
     window = history[len(history) - keep_msgs:] if keep_msgs > 0 else []
@@ -378,17 +389,77 @@ def compact_with_segments(
         return history  # 窗口覆盖全部 history，无需压缩
     window_rounds = {r.fp for r in extract_rounds(window)}
 
+    settings = get_settings()
+    archive_on = settings.SESSION_ARCHIVE_ENABLED
+
     # 逐段产出摘要消息；跨窗口段只摘要其窗口外轮次
+    early_segments: list[Segment] = []
     msgs: list[dict[str, Any]] = []
     for idx, seg in enumerate(segments):
         outside = [r for r in seg.rounds if r.fp not in window_rounds]
         if not outside:
             continue  # 段整体在窗口内（原文保留）
+        early_segments.append(seg)
         summaries = ensure_summaries(seg, needed_covered=len(outside), seg_index=idx)
+        pointer = (
+            f"\n[存档] 全文与工具数据存于 {_archive_filename(seg.first_fp)}"
+            "（细节不足时调用 read_session_archive 读取）"
+            if archive_on else ""
+        )
         for s in summaries:
-            msgs.append({"role": "system", "content": s})
+            msgs.append({"role": "system", "content": s + pointer})
+
+    # 同步归档早段（幂等）：摘要指针引用的文件必须已存在；已带工具数据
+    # 的既有轮次不会被覆盖（archive_rounds 按 meta.round_fps 跳过）。
+    # 窗口内段维持异步归档（收尾归档还会补工具数据）
+    if early_segments:
+        archive_rounds(early_segments)
+    rest = [s for s in segments if s not in early_segments]
+    if rest:
+        _archive_async(rest)
     msgs.extend(window)
     return msgs
+
+
+_ARCHIVE_FILENAME_RE = re.compile(r"^[0-9a-f]{16}\.md$")
+
+# 单次读取上限（字符）：一段含多轮 + 工具轨迹，防止一次读取撑爆上下文
+ARCHIVE_READ_MAX_CHARS = 8000
+
+
+def _archive_filename(first_fp: str) -> str:
+    """段存档文件名（与 _seg_path 一致）：<16位指纹>.md，读取工具按名取件。"""
+    return f"{first_fp}.md"
+
+
+def read_archive_file(filename: str, max_chars: int = ARCHIVE_READ_MAX_CHARS) -> dict[str, Any]:
+    """读取段存档全文（read_session_archive 工具的底层实现）。
+
+    文件名严格校验（16 位十六进制指纹 + .md，即 _round_fp 产出的命名），
+    杜绝路径穿越；meta frontmatter 剥离，只返回正文；超长截断并标记。
+
+    Raises:
+        ValueError: 文件名不合法
+        FileNotFoundError: 存档不存在（归档未跑/已清理）
+    """
+    if not _ARCHIVE_FILENAME_RE.match(filename or ""):
+        raise ValueError(
+            "存档文件名不合法：应为 16 位十六进制指纹.md，"
+            "来自历史任务摘要末尾的 [存档] 行"
+        )
+    first_fp = filename[:-3]
+    p = _seg_path(first_fp)
+    if not p.exists():
+        raise FileNotFoundError(f"存档文件不存在：{filename}（可能已被过期清理）")
+    body = _read_body(first_fp).strip()
+    truncated = len(body) > max_chars
+    return {
+        "file": filename,
+        "content": body[:max_chars],
+        "truncated": truncated,
+        "total_chars": len(body),
+        "read_at": datetime.now().isoformat(timespec="seconds"),
+    }
 
 
 def _archive_async(segments: list[Segment]) -> None:
@@ -397,7 +468,11 @@ def _archive_async(segments: list[Segment]) -> None:
     t.start()
 
 
-# ============ 按需还原（匹配） ============
+# ============ 按需还原·向量匹配（可选回退，默认关闭） ============
+#
+# 主路径是"摘要标注存档文件名 + read_session_archive 工具按需读取"；
+# 以下 query-段向量匹配注入由 SESSION_RECALL_ON_QUERY 控制（对照实验用）：
+# 段数增多后每请求比较成本线性增长，且命中即整段注入较费 token。
 
 def recall_relevant_segments(
     query: str,

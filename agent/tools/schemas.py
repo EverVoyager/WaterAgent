@@ -4,10 +4,14 @@
 1. 自动生成 OpenAI Function Calling 兼容的 JSON Schema
 2. 在 mock 执行器中校验入参
 3. 在 LangGraph 节点中复用
+
+返回值模型（TOOL_RESULT_MODELS）用于 executor 出口的运行时校验：
+工具实现漂移（字段改名/类型变化/缺失）在进入 AgentState 前被拦截，
+而非等到 synthesizer 规则引擎 KeyError 或下游静默拿到坏数据。
 """
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 # ====== 工具入参模型 ======
 
@@ -103,6 +107,17 @@ class ReadMemoryTopicParams(BaseModel):
     )
 
 
+class ReadSessionArchiveParams(BaseModel):
+    """读取历史任务段的存档全文（含当时的工具调用数据）。"""
+
+    file: str = Field(
+        ...,
+        description="存档文件名，形如 'a1b2c3d4e5f67890.md'（16 位十六进制指纹）。"
+        "来自历史对话上下文中任务段摘要末尾的 [存档] 行，只能使用上下文中"
+        "出现过的文件名，不要自行构造或猜测。",
+    )
+
+
 # ====== 工具描述常量 ======
 
 TOOL_DESCRIPTIONS = {
@@ -125,6 +140,13 @@ TOOL_DESCRIPTIONS = {
         "当索引中某主题与当前任务相关但未展开、且其细节可能影响回答时，"
         "用主题名调用本工具读取全文。主题不存在时返回 found=false。"
     ),
+    "read_session_archive": (
+        "读取已压缩历史任务段的存档全文（含当时的工具调用轨迹与预警等级）。"
+        "历史对话上下文中的任务段摘要末尾标注了 [存档] 文件名；当用户追问"
+        "早前任务的细节（如'之前查到的水位是多少''上次定的什么等级'）而摘要"
+        "中的关键数据不足以回答时，用该文件名调用本工具获取完整原文。"
+        "仅在摘要信息不够时使用：摘要已足够或与历史任务无关时不要调用。"
+    ),
 }
 
 # 工具名 → 参数模型 的映射
@@ -138,7 +160,136 @@ TOOL_PARAM_MODELS = {
     "generate_plan": GeneratePlanParams,
     "list_skills": ListSkillsParams,
     "read_memory_topic": ReadMemoryTopicParams,
+    "read_session_archive": ReadSessionArchiveParams,
 }
+
+
+# ====== 工具返回值模型（executor 出口运行时校验用） ======
+#
+# 必填字段 = 下游真正依赖的字段（规则引擎 compute_warning_level、跨工具
+# 数据流注入 _collect_weather_context、引用核验 _check_citations 直接读取的键）；
+# 随入参变化的字段（metric / analysis_type 分支）与时间戳一律 Optional，
+# 但出现时校验类型。Pydantic 默认忽略多余字段——评估 overrides 注入的
+# 附加键不受影响。
+
+class GetWeatherResult(BaseModel):
+    location: str
+    hours: int
+    total_rainfall_mm: float
+    series: list[dict]
+    max_hourly_rainfall_mm: float | None = None
+    fetched_at: str | None = None
+
+
+class GetHydrologyResult(BaseModel):
+    station: str
+    water_level_m: float | None = None
+    warning_level_m: float | None = None
+    guaranteed_level_m: float | None = None
+    flow_m3_s: float | None = None
+    warning_flow_m3_s: float | None = None
+    fetched_at: str | None = None
+
+
+class PredictRunoffResult(BaseModel):
+    station: str
+    lead_time_hours: int
+    peak_flow_m3_s: float
+    series: list[dict]
+    peak_time: str | None = None
+    model: str | None = None
+    predicted_at: str | None = None
+
+
+class QueryGisTerrainResult(BaseModel):
+    bbox: str
+    analysis_type: str
+    slope: dict | None = None
+    channel_cross_section: dict | None = None
+    inundation: dict | None = None
+    analyzed_at: str | None = None
+
+
+class SearchRegulationResult(BaseModel):
+    query: str
+    top_k: int
+    hits: list[dict]
+    searched_at: str | None = None
+
+
+class WebSearchResult(BaseModel):
+    query: str
+    results: list[dict]
+    result_count: int
+    searched_at: str | None = None
+
+
+class GeneratePlanResult(BaseModel):
+    warning_level: Literal["I", "II", "III", "IV"]
+    actions: list[str]
+    level_description: str
+    affected_area: str
+    population_at_risk: int
+    generated_at: str | None = None
+
+
+class ListSkillsResult(BaseModel):
+    skills: list[dict]
+    total: int
+    queried_at: str | None = None
+
+
+class ReadSessionArchiveResult(BaseModel):
+    file: str
+    content: str
+    truncated: bool = False
+    total_chars: int | None = None
+    read_at: str | None = None
+    source: str | None = None
+
+
+class ReadMemoryTopicResult(BaseModel):
+    topic: str
+    found: bool
+    content: str
+    hint: str | None = None
+
+
+TOOL_RESULT_MODELS = {
+    "get_weather": GetWeatherResult,
+    "get_hydrology": GetHydrologyResult,
+    "predict_runoff": PredictRunoffResult,
+    "query_gis_terrain": QueryGisTerrainResult,
+    "search_regulation": SearchRegulationResult,
+    "web_search": WebSearchResult,
+    "generate_plan": GeneratePlanResult,
+    "list_skills": ListSkillsResult,
+    "read_session_archive": ReadSessionArchiveResult,
+    "read_memory_topic": ReadMemoryTopicResult,
+}
+
+
+def validate_tool_result(tool_name: str, result: object) -> str:
+    """校验工具返回值结构（executor 出口闸）。
+
+    Returns:
+        空串 = 合法（或该工具无返回值模型）；非空 = 违规描述，调用方应把
+        本次调用记为 error、清空 result，阻止坏数据进入 AgentState。
+    """
+    model = TOOL_RESULT_MODELS.get(tool_name)
+    if model is None:
+        return ""
+    if not isinstance(result, dict):
+        return f"result 应为 dict，实际 {type(result).__name__}"
+    try:
+        model(**result)
+    except ValidationError as e:
+        details = "; ".join(
+            f"{'.'.join(str(x) for x in err['loc'])}: {err['msg']}"
+            for err in e.errors()[:3]
+        )
+        return details
+    return ""
 
 
 def build_openai_tools(tool_names: list[str] | None = None) -> list[dict]:

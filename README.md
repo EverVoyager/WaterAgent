@@ -324,6 +324,8 @@ START → **planner**（Function Calling 规划 + 信息充分性判断）
 - **命中率观测**：流式开 `include_usage`，`llm_stats` 按节点聚合 `cached_tokens`（兼容 DeepSeek `prompt_cache_hit_tokens` / vLLM 字段命名），日志输出 `[llm-cache] node=... hit_rate=...%`
 - **状态栏**：planner user 消息末尾注入动态元信息（当前时间 + 规划进度 N/M 轮，`<<<STATUS>>>` 包裹防注入）——模型据此把握汛期时效与工具预算；位于上下文最末端，每轮更新不破坏前缀缓存
 
+**实测口径（2026-09-15，deepseek-v4-flash，6 轮同站会话脚本，`evals/experiments/kv_cache.py` + `ttft_replay.py`）**：当前 MaaS 专属实例上对照实验未见稳定收益——planner 前缀命中率冻结 75.8% vs 破坏 74.1%（Δ+1.7pp，四轮重复 −2.2~+8.5pp 波动，未超噪声带宽；破坏臂命中率也高达 74%，说明该端点存在与文本前缀无关的隐式缓存）；TTFT 回放（n=13，max_tokens=1 隔离 prefill）frozen P50 0.62s vs broken 0.46s，差异在噪声内。结论如实记录：**前缀冻结工程在未开启跨请求前缀缓存的端点上收益不显现**，其价值在切换 DeepSeek 公共部署 / vLLM APC（`--enable-prefix-caching`）后兑现；工程侧的三原则改造与命中率观测已就位，切换后无需改代码即可复测。
+
 #### 关键设计速查
 
 | 设计点       | 方案                                                                                   |

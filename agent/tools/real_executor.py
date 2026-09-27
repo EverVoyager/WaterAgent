@@ -22,6 +22,7 @@ from agent.tools.schemas import (
     PredictRunoffParams,
     QueryGisTerrainParams,
     ReadMemoryTopicParams,
+    ReadSessionArchiveParams,
     SearchRegulationParams,
     WebSearchParams,
 )
@@ -326,6 +327,20 @@ def read_memory_topic_real(params: ReadMemoryTopicParams) -> dict[str, Any]:
     return {"topic": params.topic, "found": True, "content": content}
 
 
+def read_session_archive_real(params: ReadSessionArchiveParams) -> dict[str, Any]:
+    """读取历史任务段存档全文（上下文压缩的还原通道）。
+
+    底层校验与截断见 session_archive.read_archive_file；文件不存在
+    （过期清理/归档未跑）抛 FileNotFoundError，由 executor 记为工具错误
+    回传 planner——模型可基于摘要继续作答，不中断主流程。
+    """
+    from agent.memory.session_archive import read_archive_file
+
+    result = read_archive_file(params.file)
+    result["source"] = "session_archive"
+    return result
+
+
 # 真实实现的工具映射表
 _REAL_IMPLEMENTATIONS = {
     "search_regulation": search_regulation_real,
@@ -337,6 +352,7 @@ _REAL_IMPLEMENTATIONS = {
     "generate_plan": generate_plan_real,  # M10：从 mock 升级为 LLM 生成
     "list_skills": list_skills_real,  # 技能发现工具（对标 MCP tools/list）
     "read_memory_topic": read_memory_topic_real,  # 长期记忆按需读取（渐进式披露）
+    "read_session_archive": read_session_archive_real,  # 历史任务段还原（读磁盘归档）
 }
 
 
