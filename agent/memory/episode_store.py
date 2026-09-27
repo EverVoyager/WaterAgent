@@ -43,6 +43,8 @@ class EpisodeStore(BaseStore):
                     tags: str = "", happened_at: datetime | None = None) -> int | None:
         """写入一条情景记忆，返回新 id（失败 None）。"""
         self._ensure_tables()
+        # TEXT 上限 64KB（utf8mb4 中文 3 字节/字符），超长会被 MySQL 拒绝而静默丢失
+        tool_json = json.dumps(tool_calls, ensure_ascii=False) if tool_calls else None
         try:
             with self._get_conn() as conn, conn.cursor() as cur:
                 cur.execute(
@@ -51,8 +53,9 @@ class EpisodeStore(BaseStore):
                     "tool_calls_json, tags) VALUES (%s, %s, %s, %s, %s, %s, %s)",
                     (
                         happened_at or datetime.now(),
-                        event_summary[:512], resolution, outcome, query_summary[:512],
-                        json.dumps(tool_calls, ensure_ascii=False) if tool_calls else None,
+                        event_summary[:512], resolution[:15000], outcome,
+                        query_summary[:512],
+                        tool_json[:15000] if tool_json else None,
                         tags[:256],
                     ),
                 )
@@ -108,20 +111,29 @@ class EpisodeStore(BaseStore):
             logger.warning("[episode] 删除失败：%s", e)
             return False
 
-    def delete_older_than(self, days: int = 90, limit: int = 200) -> int:
-        """归档剪枝：删除超期情景（Curator 用），返回删除条数。"""
+    def delete_older_than(self, days: int = 90, limit: int = 200) -> list[int]:
+        """归档剪枝：删除超期情景（Curator 用），返回被删除的 id 列表。
+
+        调用方需据返回值同步删除对应向量点，否则已删行的向量会残留，
+        检索命中后取不回 MySQL 行（白白占用 top-k 名额）。
+        """
         self._ensure_tables()
         try:
             with self._get_conn() as conn, conn.cursor() as cur:
                 cur.execute(
-                    "DELETE FROM agent_episodes WHERE happened_at < "
-                    "DATE_SUB(NOW(), INTERVAL %s DAY) LIMIT %s",
+                    "SELECT id FROM agent_episodes WHERE happened_at < "
+                    "DATE_SUB(NOW(), INTERVAL %s DAY) ORDER BY happened_at LIMIT %s",
                     (days, limit),
                 )
-                return cur.rowcount
+                ids = [r["id"] for r in cur.fetchall()]
+                if not ids:
+                    return []
+                ph = ",".join(["%s"] * len(ids))
+                cur.execute(f"DELETE FROM agent_episodes WHERE id IN ({ph})", ids)
+                return ids
         except Exception as e:
             logger.warning("[episode] 归档失败：%s", e)
-            return 0
+            return []
 
 
 _store: EpisodeStore | None = None

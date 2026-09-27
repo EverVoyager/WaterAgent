@@ -172,6 +172,12 @@ def run_graph_agent(user_query: str, history: list[dict[str, Any]] = None) -> di
           - intent: str  chitchat / agent_task（由 planner 决策，非独立路由）
     """
     app = build_agent_graph()
+    # 效果闭环：清空上一请求的注入追踪（thread-local，防止跨请求残留）
+    try:
+        from agent.memory.experience import clear_injected_tracking
+        clear_injected_tracking()
+    except Exception:
+        pass
     compacted_history = _compact_history_entry(history or [])
     initial_state: AgentState = {
         "user_query": user_query,
@@ -185,6 +191,15 @@ def run_graph_agent(user_query: str, history: list[dict[str, Any]] = None) -> di
     # intent 由 planner 间接决定：无工具调用走 direct_chat → chitchat；否则 agent_task
     is_chitchat = not final_state.get("tool_calls") and final_state.get("rounds", 0) <= 1
     intent = "chitchat" if is_chitchat else "agent_task"
+    # 效果闭环：注入记忆计数（与流式入口对齐；漏计会导致 hit_count 被低估，
+    # Curator 的"零命中超期"剪枝会误删实际高频使用的记忆）
+    try:
+        from agent.memory.experience import finalize_injected_tracking
+        finalize_injected_tracking(success=True)
+    except Exception:
+        pass
+    # 自进化：异步触发反思（format_retry 经 synthesizer_node 写入 final_state）
+    _maybe_trigger_reflection(final_state, user_query, final_state.get("final_answer", ""))
     # 收尾归档：本轮（含工具轨迹）异步追加进所属任务段
     _maybe_archive_round(
         history or [], user_query,
@@ -227,8 +242,13 @@ def _stream_chitchat_branch(
         recalled_context=recalled_context,
         experiences=experiences,
     ):
-        # 客户端已断开：停止消费 LLM 流，提前结束
+        # 客户端已断开：停止消费 LLM 流，提前结束（planner 注入已发生，仍计数收尾）
         if cancel_event is not None and cancel_event.is_set():
+            try:
+                from agent.memory.experience import finalize_injected_tracking
+                finalize_injected_tracking(success=False)
+            except Exception:
+                pass
             return
         if ev["type"] == "answer_delta":
             yield ev
@@ -238,6 +258,16 @@ def _stream_chitchat_branch(
            "message": "回复生成完成", "details": {}}
     # 收尾归档：本轮异步追加进所属任务段（闲聊无工具轨迹）
     _maybe_archive_round(raw_history or history or [], user_query, final_answer, [])
+    # 效果闭环 + 反思：闲聊路径同样收尾（"以后回答简洁点"类偏好多出现在闲聊，
+    # 长期记忆写入不依赖 MySQL，不应因走闲聊分支而漏学）
+    try:
+        from agent.memory.experience import finalize_injected_tracking
+        finalize_injected_tracking(success=True)
+    except Exception:
+        pass
+    _maybe_trigger_reflection(
+        {"tool_calls": [], "rounds": 1}, user_query, final_answer, format_retry=False,
+    )
     yield {
         "type": "done",
         "data": {
@@ -389,23 +419,29 @@ def _stream_synthesizer_phase(
     return synth_meta, final_answer
 
 
-def _maybe_trigger_reflection(state: AgentState, user_query: str, final_answer: str) -> None:
+def _maybe_trigger_reflection(state: AgentState, user_query: str, final_answer: str,
+                              format_retry: bool | None = None) -> None:
     """自进化：在响应完成后异步触发反思循环（不阻塞响应发送）。
 
     任何异常均捕获并降级为 debug 日志，确保不影响主流程。
     同时把本次注入的记忆传给反思，评估注入有效性（效果闭环）。
+    format_retry：synthesizer 结构化输出是否触发过重试（format_error 触发
+    信号）；None 时从 state 读取（非流式路径经 synthesizer_node 写入 state）。
     """
     try:
         from agent.memory import run_reflection_async, should_reflect
         from agent.memory.experience import get_injected_memories
         tool_calls_state = state.get("tool_calls", [])
         tool_errors = [tc.get("error", "") for tc in tool_calls_state if tc.get("error")]
+        if format_retry is None:
+            format_retry = bool(state.get("format_retry", False))
         trigger_reason = should_reflect(
             user_query=user_query,
             final_answer=final_answer,
             tool_calls=tool_calls_state,
             tool_errors=tool_errors,
             rounds=state.get("rounds", 0),
+            format_retry=format_retry,
         )
         if trigger_reason:
             run_reflection_async(
@@ -415,6 +451,7 @@ def _maybe_trigger_reflection(state: AgentState, user_query: str, final_answer: 
                 tool_errors=tool_errors,
                 rounds=state.get("rounds", 0),
                 trigger_reason=trigger_reason,
+                format_retry=format_retry,
                 # 效果闭环：本次注入的记忆（planner 经验 + synthesizer 偏好）
                 # 在同一 worker 线程内记录，反思时评估是否需要降权
                 injected_memories=get_injected_memories(),
@@ -484,6 +521,12 @@ def run_graph_agent_stream_v2(
 
         # 客户端已断开：跳过 synthesizer 阶段（不再消耗 LLM token）
         if cancel_event is not None and cancel_event.is_set():
+            # planner 第 1 轮已注入过经验，仍需计数收尾（按未成功交付计）
+            try:
+                from agent.memory.experience import finalize_injected_tracking
+                finalize_injected_tracking(success=False)
+            except Exception:
+                pass
             return
 
         # synthesizer：流式生成最终回答
@@ -491,9 +534,9 @@ def run_graph_agent_stream_v2(
             state, user_query, cancel_event,
         )
 
-        # 客户端断开导致的提前返回：不再产出 done 事件
-        if cancel_event is not None and cancel_event.is_set():
-            return
+        # 客户端断开导致的提前返回：不再产出 done 事件，
+        # 但回答已完整生成，计数/反思/归档等收尾仍执行
+        client_gone = cancel_event is not None and cancel_event.is_set()
 
         # 效果闭环：注入记忆计数（成功路径）
         try:
@@ -503,7 +546,10 @@ def run_graph_agent_stream_v2(
             pass
 
         # 自进化：异步触发反思循环（不阻塞响应发送）
-        _maybe_trigger_reflection(state, user_query, final_answer)
+        _maybe_trigger_reflection(
+            state, user_query, final_answer,
+            format_retry=bool((synth_meta or {}).get("format_retry", False)),
+        )
 
         # 收尾归档：本轮（含工具轨迹）异步追加进所属任务段
         _maybe_archive_round(
@@ -511,6 +557,9 @@ def run_graph_agent_stream_v2(
             state.get("tool_calls", []),
             (synth_meta or {}).get("warning_level", ""),
         )
+
+        if client_gone:
+            return
 
         yield {
             "type": "done",

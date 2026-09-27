@@ -75,8 +75,10 @@ class SemanticStore(BaseStore):
         ph = ",".join(["%s"] * len(ids))
         try:
             with self._get_conn() as conn, conn.cursor() as cur:
+                # 含时间字段：注入时标注时效（越久远越需谨慎引用）
                 cur.execute(
-                    f"SELECT id, title, content FROM agent_semantic WHERE id IN ({ph})",
+                    f"SELECT id, title, content, created_at, updated_at "
+                    f"FROM agent_semantic WHERE id IN ({ph})",
                     ids,
                 )
                 return cur.fetchall()
@@ -85,6 +87,7 @@ class SemanticStore(BaseStore):
             return []
 
     def increment_hit(self, semantic_id: int) -> None:
+        self._ensure_tables()
         try:
             with self._get_conn() as conn, conn.cursor() as cur:
                 cur.execute(

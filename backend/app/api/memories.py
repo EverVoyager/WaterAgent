@@ -12,14 +12,16 @@
 - GET      /api/memories/episodes       情景记忆列表
 - GET      /api/memories/procedures     程序记忆列表
 - POST     /api/memories/procedures/{id}/promote  手动晋升为 Skill
-- POST     /api/memories/compact        手动触发一轮 Curator 治理
+- POST     /api/memories/compact        手动触发一轮 Curator 治理（后台异步执行）
 - GET      /api/memories/reflections    反思日志（审计）
+
+鉴权：MEMORY_ADMIN_API_KEY 非空时全路由要求 X-API-Key 头。
 """
 import logging
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from agent.memory import longterm
@@ -30,7 +32,21 @@ from agent.memory.semantic_store import get_semantic_store
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/memories", tags=["memories"])
+
+async def _require_admin_key(x_api_key: str | None = Header(default=None)) -> None:
+    """可选治理钥匙：MEMORY_ADMIN_API_KEY 非空时强制校验 X-API-Key 头。
+
+    本 API 可改写用户手册/删除记忆/触发治理，公网部署应配置钥匙；
+    留空保持本地开发的匿名可用（前端当前不依赖此 API）。
+    """
+    from app.core.config import get_settings
+    expected = getattr(get_settings(), "MEMORY_ADMIN_API_KEY", "")
+    if expected and x_api_key != expected:
+        raise HTTPException(status_code=401, detail="缺少或无效的 X-API-Key")
+
+
+router = APIRouter(prefix="/api/memories", tags=["memories"],
+                   dependencies=[Depends(_require_admin_key)])
 
 
 # ====== 响应模型 ======
@@ -127,10 +143,6 @@ class AutoMemoryResponse(BaseModel):
     topics: list[dict[str, Any]]
 
 
-class CompactResponse(BaseModel):
-    compacted: int
-
-
 class ReflectionItem(BaseModel):
     id: int
     user_query: str
@@ -213,6 +225,12 @@ async def list_semantic(limit: int = Query(100, ge=1, le=500),
 async def create_semantic(req: SemanticCreateRequest):
     if not is_memory_enabled():
         raise HTTPException(status_code=503, detail="MySQL 未配置，语义记忆不可用")
+    # 手动写入与自动反思路径过同样的安全闸（注入载荷/敏感信息/领域事实），
+    # 否则手动录入的错误阈值断言会被检索注入系统性放大
+    from agent.memory.reflection import check_memory_safety
+    violation = check_memory_safety(f"{req.title}。{req.content}")
+    if violation:
+        raise HTTPException(status_code=422, detail=f"内容未通过安全校验（{violation[:80]}）")
     from agent.memory import vector_index
     mem_id = get_semantic_store().add_semantic(
         title=req.title, content=req.content, source="manual", tags=req.tags)
@@ -298,12 +316,29 @@ async def promote_procedure(procedure_id: int):
 
 # ====== 压缩 / 审计 ======
 
-@router.post("/compact", response_model=CompactResponse)
+class CompactResponse(BaseModel):
+    started: bool
+
+
+@router.post("/compact", response_model=CompactResponse, status_code=202)
 async def compact_memories():
-    """手动触发一轮 Curator 治理（剪枝+压缩+提炼+晋升+对账）。"""
+    """手动触发一轮 Curator 治理（后台线程异步执行）。
+
+    完整治理含多次 LLM 调用与全量向量对账（分钟级），在请求内同步执行
+    会阻塞事件循环，因此提交后台线程后立即返回。
+    """
+    import threading
+
     from agent.memory.curator import run_curation_once
-    stats = run_curation_once()
-    return CompactResponse(compacted=stats.get("compacted", 0))
+
+    def _run():
+        try:
+            run_curation_once()
+        except Exception as e:
+            logger.warning("[memories-api] 手动治理失败：%s", e)
+
+    threading.Thread(target=_run, daemon=True, name="manual-curator").start()
+    return CompactResponse(started=True)
 
 
 @router.get("/reflections", response_model=ReflectionListResponse)

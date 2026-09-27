@@ -29,6 +29,7 @@ from agent.memory.memory_store import (
     is_memory_enabled,
 )
 from agent.memory.reflection import (
+    check_memory_safety,
     run_reflection_async,
     should_reflect,
 )
@@ -41,6 +42,7 @@ __all__ = [
     # reflection
     "should_reflect",
     "run_reflection_async",
+    "check_memory_safety",
     # experience（注入聚合）
     "get_relevant_experiences",
     "get_semantic_knowledge",

@@ -21,6 +21,7 @@ from agent.tools.schemas import (
     ListSkillsParams,
     PredictRunoffParams,
     QueryGisTerrainParams,
+    ReadMemoryTopicParams,
     SearchRegulationParams,
     WebSearchParams,
 )
@@ -305,6 +306,26 @@ def list_skills_real(params: ListSkillsParams) -> dict[str, Any]:
     }
 
 
+def read_memory_topic_real(params: ReadMemoryTopicParams) -> dict[str, Any]:
+    """读取长期记忆主题文件全文（渐进式披露的按需读取入口）。
+
+    system prompt 只注入长期记忆索引 + 与当前 query 相关的主题摘要；
+    本工具让模型在索引提示相关但未展开时拉取完整主题内容（含时效日期）。
+    纯本地文件读取，不会失败（主题不存在返回 found=false）。
+    """
+    from agent.memory import longterm
+
+    content = longterm.read_topic(params.topic)
+    if content is None:
+        return {
+            "topic": params.topic,
+            "found": False,
+            "content": "",
+            "hint": "主题不存在，请以长期记忆索引中的主题名为准",
+        }
+    return {"topic": params.topic, "found": True, "content": content}
+
+
 # 真实实现的工具映射表
 _REAL_IMPLEMENTATIONS = {
     "search_regulation": search_regulation_real,
@@ -315,6 +336,7 @@ _REAL_IMPLEMENTATIONS = {
     "predict_runoff": predict_runoff_real,
     "generate_plan": generate_plan_real,  # M10：从 mock 升级为 LLM 生成
     "list_skills": list_skills_real,  # 技能发现工具（对标 MCP tools/list）
+    "read_memory_topic": read_memory_topic_real,  # 长期记忆按需读取（渐进式披露）
 }
 
 

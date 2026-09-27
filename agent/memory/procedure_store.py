@@ -119,6 +119,7 @@ class ProcedureStore(BaseStore):
 
     def record_use(self, procedure_id: int, success: bool) -> None:
         """被注入时计数（planner 注入后调用）。"""
+        self._ensure_tables()
         try:
             with self._get_conn() as conn, conn.cursor() as cur:
                 cur.execute(
@@ -132,6 +133,7 @@ class ProcedureStore(BaseStore):
     def update_steps(self, procedure_id: int, steps: list[dict[str, Any]],
                      applicability: str | None = None) -> bool:
         """Curator 提炼：替换为泛化后的通用步骤。"""
+        self._ensure_tables()
         try:
             with self._get_conn() as conn, conn.cursor() as cur:
                 if applicability:
@@ -183,6 +185,7 @@ class ProcedureStore(BaseStore):
             return []
 
     def mark_promoted(self, procedure_id: int) -> None:
+        self._ensure_tables()
         try:
             with self._get_conn() as conn, conn.cursor() as cur:
                 cur.execute(
@@ -191,9 +194,12 @@ class ProcedureStore(BaseStore):
                 )
         except Exception as e:
             logger.warning("[procedure] 标记晋升失败：%s", e)
+            return
+        self._remove_vector(procedure_id)
 
     def demote(self, procedure_id: int) -> None:
         """反思判定无效 → 降权（deprecated，不再注入）。"""
+        self._ensure_tables()
         try:
             with self._get_conn() as conn, conn.cursor() as cur:
                 cur.execute(
@@ -202,6 +208,20 @@ class ProcedureStore(BaseStore):
                 )
         except Exception as e:
             logger.debug("[procedure] 降权失败：%s", e)
+            return
+        self._remove_vector(procedure_id)
+
+    def _remove_vector(self, procedure_id: int) -> None:
+        """状态离开 active 后同步删除向量点。
+
+        get_by_ids 只返回 active 行，非 active 程序的残留向量命中后永远
+        取不回行，白占 top-k 名额（对账周期内持续影响注入质量）。
+        """
+        try:
+            from agent.memory import vector_index
+            vector_index.remove_procedure(procedure_id)
+        except Exception as e:
+            logger.debug("[procedure] 向量清理失败 id=%s：%s", procedure_id, e)
 
     def delete_procedure(self, procedure_id: int) -> bool:
         self._ensure_tables()
@@ -271,11 +291,15 @@ class ProcedureStore(BaseStore):
     @staticmethod
     def _to_snake_name(name: str) -> str:
         """中文/任意名称 → snake_case 合法 Skill 名。"""
+        import hashlib
         import re
         # 非字母数字下划线全部替换为 _，压缩连续 _，确保字母开头
         s = re.sub(r"[^a-zA-Z0-9_]+", "_", name).strip("_").lower()
         if not s or not s[0].isalpha():
-            s = "proc_" + (s or str(abs(hash(name)) % 10000))
+            # 兜底名必须跨进程确定：内置 hash 受 PYTHONHASHSEED 随机化影响，
+            # 重启后同名程序会生成不同 skill_name，破坏"同名冲突=已晋升"的幂等判定
+            digest = hashlib.md5(name.encode("utf-8")).hexdigest()[:8]
+            s = "proc_" + (s or digest)
         return s[:60]
 
 

@@ -34,6 +34,7 @@ class AgentState(TypedDict, total=False):
     actions: list[str]
     final_answer: str
     citations: list[dict[str, Any]]          # Citation Grounding 引用列表（已校验）
+    format_retry: bool                       # synthesizer 结构化输出是否触发过重试（反思 format_error 信号）
     # Skill 机制（借鉴 Claude Skills）：匹配到的技能指令 + 工具子集
     skill_name: str                          # 匹配到的 Skill 名（未匹配为空）
     skill_instructions: str                  # 匹配到的 Skill 行为指令

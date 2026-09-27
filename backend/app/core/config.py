@@ -117,6 +117,9 @@ class Settings(BaseSettings):
     CURATOR_ENABLED: bool = True
     # 治理周期（小时），默认 168h = 7 天（对齐 Hermes Curator 的 7-day cycle）
     CURATOR_INTERVAL_HOURS: int = 168
+    # 记忆治理 API 钥匙（/api/memories/*）：非空时请求必须携带 X-API-Key 头。
+    # 留空 = 不鉴权（本地开发默认；该 API 可改写/删除记忆，公网部署务必配置）
+    MEMORY_ADMIN_API_KEY: str = ""
 
     @field_validator("CORS_ORIGINS")
     @classmethod

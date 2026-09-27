@@ -29,6 +29,26 @@ _PROCEDURE_CAP = 2
 _SEMANTIC_CAP = 3
 
 
+def _date_of(val: Any) -> str:
+    """datetime/str -> 'YYYY-MM-DD'（供注入标注时效，未知返回空串）。"""
+    s = str(val or "")
+    return s[:10] if len(s) >= 10 and s[4] == "-" and s[7] == "-" else ""
+
+
+def _passes_read_gate(*texts: str) -> bool:
+    """读时安全闸：注入前校验候选记忆内容。
+
+    与写入侧同一套闸（注入载荷/敏感信息/领域事实）。领域事实闸对照的是
+    当前 WARNING_THRESHOLDS——写入后阈值若调整，旧断言在此暴露，不再注入。
+    闸自身故障时放行（降级为信任写入侧校验，不阻塞主流程）。
+    """
+    try:
+        from agent.memory.reflection import check_memory_safety
+        return check_memory_safety(*texts) is None
+    except Exception:
+        return True
+
+
 # ============ 注入追踪（效果闭环）============
 
 _local = threading.local()
@@ -102,9 +122,11 @@ def get_relevant_experiences(query: str) -> str:
         for ep in episodes:
             outcome_cn = {"success": "顺利解决", "failure": "当时未解决",
                           "partial": "部分解决"}.get(ep.get("outcome", ""), "")
+            date = _date_of(ep.get("happened_at"))
+            date_tag = f"{date}，" if date else ""
             lines.append(
-                f"  {len(lines) + 1}. 曾遇「{ep.get('event_summary', '')}」，"
-                f"当时处理：{ep.get('resolution', '') or '（无记录）'}（{outcome_cn}）"
+                f"  {len(lines) + 1}. 曾遇「{ep.get('event_summary', '')}」（{date_tag}{outcome_cn}），"
+                f"当时处理：{ep.get('resolution', '') or '（无记录）'}"
             )
         sections.append("【历史类似情形】\n" + "\n".join(lines))
 
@@ -112,8 +134,11 @@ def get_relevant_experiences(query: str) -> str:
     if procedures:
         lines = []
         for proc in procedures:
+            date = _date_of(proc.get("updated_at") or proc.get("created_at"))
+            date_tag = f"（更新 {date}）" if date else ""
             lines.append(
-                f"  {len(lines) + 1}. {proc.get('name', '')}——适用：{proc.get('applicability', '')}"
+                f"  {len(lines) + 1}. {proc.get('name', '')}{date_tag}"
+                f"——适用：{proc.get('applicability', '')}"
             )
         sections.append("【推荐方法】\n" + "\n".join(lines))
 
@@ -149,9 +174,18 @@ def _collect_episodes(query: str) -> list[dict[str, Any]]:
         order = {h["id"]: i for i, h in enumerate(hits)}
         rows.sort(key=lambda r: order.get(r["id"], 999))
 
+    rows = [r for r in rows if _episode_readable(r)]
     for r in rows:
         _record_injected("episode", r.get("id", 0), r.get("event_summary", ""))
     return rows
+
+
+def _episode_readable(ep: dict[str, Any]) -> bool:
+    """读时安全闸：未通过的情景记忆跳过注入（不占 top-k 名额也不计数）。"""
+    if _passes_read_gate(ep.get("event_summary", ""), ep.get("resolution", "")):
+        return True
+    logger.warning("[experience] 情景记忆 id=%s 未通过读时校验，跳过注入", ep.get("id"))
+    return False
 
 
 def _collect_procedures(query: str) -> list[dict[str, Any]]:
@@ -181,9 +215,18 @@ def _collect_procedures(query: str) -> list[dict[str, Any]]:
         order = {h["id"]: i for i, h in enumerate(hits)}
         rows.sort(key=lambda r: order.get(r["id"], 999))
 
+    rows = [r for r in rows if _procedure_readable(r)]
     for r in rows:
         _record_injected("procedure", r.get("id", 0), r.get("applicability", ""))
     return rows
+
+
+def _procedure_readable(proc: dict[str, Any]) -> bool:
+    """读时安全闸：未通过的程序记忆跳过注入。"""
+    if _passes_read_gate(proc.get("name", ""), proc.get("applicability", "")):
+        return True
+    logger.warning("[experience] 程序记忆 id=%s 未通过读时校验，跳过注入", proc.get("id"))
+    return False
 
 
 # ============ synthesizer 注入：语义记忆 ============
@@ -216,10 +259,21 @@ def get_semantic_knowledge(query: str | None) -> str:
         order = {h["id"]: i for i, h in enumerate(hits)}
         rows.sort(key=lambda r: order.get(r["id"], 999))
 
+    filtered = []
+    for r in rows:
+        if _passes_read_gate(r.get("title", ""), r.get("content", "")):
+            filtered.append(r)
+        else:
+            logger.warning("[experience] 语义记忆 id=%s 未通过读时校验，跳过注入", r.get("id"))
+    rows = filtered
+
     if not rows:
         return ""
     for r in rows:
         _record_injected("semantic", r.get("id", 0), r.get("title", ""))
-    lines = [f"  {i}. {r.get('title', '')}：{r.get('content', '')}"
-             for i, r in enumerate(rows, 1)]
+    lines = []
+    for i, r in enumerate(rows, 1):
+        date = _date_of(r.get("updated_at") or r.get("created_at"))
+        date_tag = f"[{date}] " if date else ""
+        lines.append(f"  {i}. {date_tag}{r.get('title', '')}：{r.get('content', '')}")
     return "【已积累领域知识】\n" + "\n".join(lines)

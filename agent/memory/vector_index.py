@@ -68,7 +68,10 @@ def _index_one(collection: str, row_id: int, embed_text: str,
             return False
         get_qdrant_client().upsert(
             collection_name=collection,
-            points=[qmodels.PointStruct(id=row_id, vector=vec.tolist(), payload=payload)],
+            # kind=memory 与 _sync_all 的过滤删除对齐：缺失该字段的点在对账时
+            # 无法被清理，MySQL 行删除后会残留为幽灵向量占用 top-k 名额
+            points=[qmodels.PointStruct(
+                id=row_id, vector=vec.tolist(), payload={"kind": "memory", **payload})],
         )
         return True
     except Exception as e:

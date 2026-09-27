@@ -48,6 +48,7 @@ class MemoryStore(BaseStore):
     ) -> int | None:
         """写入一条反思审计记录，返回新 id（失败 None）。"""
         self._ensure_tables()
+        # TEXT 上限 64KB（utf8mb4），final_answer 等字段超长会导致整条 INSERT 失败
         try:
             with self._get_conn() as conn, conn.cursor() as cur:
                 cur.execute(
@@ -55,8 +56,9 @@ class MemoryStore(BaseStore):
                     "(user_query, trigger_reason, tool_calls_summary, final_answer, "
                     "reflection_text, memories_created) VALUES (%s, %s, %s, %s, %s, %s)",
                     (
-                        user_query, trigger_reason[:64], tool_calls_summary,
-                        final_answer, reflection_text, memories_created,
+                        user_query[:15000], trigger_reason[:64],
+                        tool_calls_summary[:15000], final_answer[:15000],
+                        reflection_text[:15000], memories_created,
                     ),
                 )
                 return cur.lastrowid

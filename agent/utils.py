@@ -164,3 +164,31 @@ class CitationMarkerFilter:
         out = self._buf
         self._buf = ""
         return strip_citation_markers(out, self._valid)
+
+
+# ====== 字符二元组重叠（记忆相关性/查重共用，零依赖确定性） ======
+
+_BIGRAM_STRIP_RE = re.compile(r"[\s，。、；：,.;:!?！？'\"“”‘’()\[\]（）【】\-—_/\|]+")
+def char_bigrams(text: str) -> set[str]:
+    """中文友好的字符二元组集合（去空白/标点后切分）。"""
+    t = _BIGRAM_STRIP_RE.sub("", text or "")
+    if len(t) < 2:
+        return {t} if t else set()
+    return {t[i:i + 2] for i in range(len(t) - 1)}
+
+
+def text_coverage(new: str, existing: str) -> float:
+    """new 的二元组被 existing 覆盖的比例（0-1）。
+
+    用于写入查重（new 的内容基本已在 existing 里 → 重复）与
+    query-主题相关性打分（query 的片段出现在主题内容里 → 相关）。
+    两侧同样去空白/标点后再比对，保证 text_coverage(x, x) == 1.0。
+    """
+    nb = char_bigrams(new)
+    if not nb:
+        return 0.0
+    existing_clean = _BIGRAM_STRIP_RE.sub("", existing or "")
+    if not existing_clean:
+        return 0.0
+    hit = sum(1 for g in nb if g in existing_clean)
+    return hit / len(nb)

@@ -71,6 +71,8 @@ def synthesizer_node(state: AgentState) -> dict[str, Any]:
         "actions": synth.get("actions", []),
         "final_answer": synth.get("answer", ""),
         "citations": citations,
+        # 结构化输出是否触发过重试（反思 format_error 触发信号，经 state 透传）
+        "format_retry": bool(synth.get("_format_retry", False)),
     }
 
 
@@ -321,10 +323,11 @@ def _build_synth_system_content(
     except Exception as e:
         logger.debug("[synthesizer] 注入 Skill 元信息失败（不影响主流程）：%s", e)
 
-    # 长期记忆常驻注入（用户手册 + Agent 自动积累，双层文件）
+    # 长期记忆常驻注入（手册+索引常驻，主题按 query 相关性展开——渐进式披露；
+    # Phase 1/2 传同一 query → 同一段记忆，前缀对齐不受影响）
     try:
         from agent.memory import build_longterm_section
-        system_content += build_longterm_section()
+        system_content += build_longterm_section(query or None)
     except Exception as e:
         logger.debug("[synthesizer] 注入长期记忆失败（不影响主流程）：%s", e)
 
@@ -551,6 +554,7 @@ def _synth_via_llm(
 
     # Generate-Verify-Correct 循环
     result: dict[str, Any] | None = None
+    format_retry = False  # 结构化输出是否触发过重试（反思 format_error 信号源）
     for attempt in range(_MAX_VERIFY_RETRIES + 1):
         resp = _call_synth_with_fallback(client, settings["model"], messages)
         msg = resp.choices[0].message
@@ -568,6 +572,7 @@ def _synth_via_llm(
             logger.error("[synthesizer] LLM 返回非 JSON（raw 前 300 字）: %s", raw_content[:300])
             if attempt < _MAX_VERIFY_RETRIES:
                 # 带反馈重试（常见于输出被截断或字段类型错误）
+                format_retry = True
                 _append_structured_retry_feedback(
                     messages, msg,
                     "你上次的输出不是合法 JSON（可能被截断）。请严格输出符合 schema 的"
@@ -608,6 +613,7 @@ def _synth_via_llm(
 
         if attempt < _MAX_VERIFY_RETRIES:
             # 追加校验反馈，要求 LLM 修正后重生成
+            format_retry = True
             if not level_ok:
                 logger.warning("[synthesizer] 等级校验失败（attempt=%d）：%s",
                                attempt, level_feedback)
@@ -642,6 +648,7 @@ def _synth_via_llm(
     valid_ids = {c["ref_id"] for c in citations}
     if result.get("answer"):
         result["answer"] = strip_citation_markers(result["answer"], valid_ids)
+    result["_format_retry"] = format_retry
     return result, citations
 
 
@@ -708,6 +715,7 @@ def _synth_metadata_via_llm_iter(
     client = get_llm_client().with_options(timeout=LLM_TIMEOUTS["synthesizer"])
 
     result: dict[str, Any] | None = None
+    format_retry = False  # 结构化输出是否触发过重试（反思 format_error 信号源）
     for attempt in range(_MAX_VERIFY_RETRIES + 1):
         yield {"type": "reasoning_step", "step": "synthesizer", "phase": "thinking",
                "message": "正在综合工具数据生成研判结论（等级/依据/措施）...",
@@ -724,6 +732,7 @@ def _synth_metadata_via_llm_iter(
         if result is None:
             logger.error("[synthesizer] Phase 1 LLM 返回非 JSON（raw 前 300 字）: %s", raw_content[:300])
             if attempt < _MAX_VERIFY_RETRIES:
+                format_retry = True
                 yield {"type": "reasoning_step", "step": "synthesizer", "phase": "decision",
                        "message": "结构化输出格式异常（可能被截断），正在重新生成...",
                        "details": {"attempt": attempt}}
@@ -764,6 +773,7 @@ def _synth_metadata_via_llm_iter(
             break
 
         if attempt < _MAX_VERIFY_RETRIES:
+            format_retry = True
             if not level_ok:
                 logger.warning("[synthesizer] Phase 1 等级校验失败（attempt=%d）：%s",
                                attempt, level_feedback)
@@ -798,6 +808,7 @@ def _synth_metadata_via_llm_iter(
         result.get("citations", []) or [], source_registry
     )
     _normalize_level(result)
+    result["_format_retry"] = format_retry
     yield {"type": "_synth_meta_result", "result": result, "citations": citations}
 
 
@@ -1029,6 +1040,8 @@ def _synth_via_llm_stream(
             "reasoning": synth.get("reasoning", ""),
             "actions": synth.get("actions", []),
             "citations": citations,
+            # 结构化输出是否触发过重试（反思 format_error 触发信号，前端可忽略）
+            "format_retry": bool(synth.get("_format_retry", False)),
         },
     }
 

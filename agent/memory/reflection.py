@@ -25,7 +25,10 @@
 import json
 import logging
 import re
+import threading
+import time
 import traceback
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -51,6 +54,25 @@ _FEEDBACK_KEYWORDS = {"以后", "下次", "请记住", "建议", "希望", "偏�
 
 # 反思输出 token 预算：思考型模型的 <think> 块会消耗大量预算
 _REFLECTION_MAX_TOKENS = 4096
+
+# 反思频率上限（滚动窗口）：触发词含"不是/建议/不要"等高频子串，multi_round
+# 覆盖几乎所有业务请求——超限后丢弃新任务，防反思成本随流量线性膨胀
+_REFLECT_RATE_MAX = 30
+_REFLECT_RATE_WINDOW_S = 3600.0
+_reflect_times: deque[float] = deque()
+_reflect_rate_lock = threading.Lock()
+
+
+def _reflection_rate_exceeded() -> bool:
+    """滑动窗口限流：窗口内提交数超限返回 True（并记录本次时刻）。"""
+    now = time.monotonic()
+    with _reflect_rate_lock:
+        while _reflect_times and now - _reflect_times[0] > _REFLECT_RATE_WINDOW_S:
+            _reflect_times.popleft()
+        if len(_reflect_times) >= _REFLECT_RATE_MAX:
+            return True
+        _reflect_times.append(now)
+        return False
 
 
 def should_reflect(
@@ -81,10 +103,17 @@ def should_reflect(
 
 
 def _reflection_available() -> bool:
-    """反思是否可运行：长期记忆（文件）或 MySQL 任一可用。"""
+    """反思是否可运行：SELF_EVOLUTION_ENABLED 主开关 + 文件记忆/MySQL 任一可用。
+
+    SELF_EVOLUTION_ENABLED=False 时反思循环整体停用（对齐 config 注释语义）；
+    该开关此前只被 Curator 检查，反思照跑导致"关闭自进化"不生效。
+    """
     try:
         from app.core.config import get_settings
-        if getattr(get_settings(), "AUTO_MEMORY_ENABLED", True):
+        settings = get_settings()
+        if not getattr(settings, "SELF_EVOLUTION_ENABLED", True):
+            return False
+        if getattr(settings, "AUTO_MEMORY_ENABLED", True):
             return True
     except Exception:
         pass
@@ -109,6 +138,12 @@ def run_reflection_async(
     """
     if not _reflection_available():
         logger.debug("[reflection] 记忆模块未启用，跳过反思")
+        return
+    if _reflection_rate_exceeded():
+        logger.info(
+            "[reflection] 近 %ds 内反思提交已达 %d 次，跳过（reason=%s）",
+            int(_REFLECT_RATE_WINDOW_S), _REFLECT_RATE_MAX, trigger_reason,
+        )
         return
 
     _REFLECT_EXECUTOR.submit(
@@ -158,8 +193,8 @@ def _run_reflection_sync(
 
         memories_created = 0
 
-        # 1. 长期记忆：写入 memory/ 目录（文件，无需 MySQL）
-        memories_created += _dispatch_longterm(reflection, user_query)
+        # 1. 长期记忆：写入 memory/ 目录（文件，无需 MySQL；仅用户纠正/反馈触发）
+        memories_created += _dispatch_longterm(reflection, user_query, trigger_reason)
 
         # 2. 语义记忆：领域知识（MySQL + 向量）
         memories_created += _dispatch_semantic(reflection, user_query)
@@ -172,8 +207,10 @@ def _run_reflection_sync(
         # 4. 程序记忆：可复用解决方法（MySQL + 向量）
         memories_created += _dispatch_procedure(reflection, tool_calls, tool_errors, rounds)
 
-        # 5. 效果闭环：注入后仍无效的记忆 demote
-        demoted = _demote_ineffective(reflection.get("demote") or {})
+        # 5. 效果闭环：注入后仍无效的记忆 demote（仅限本次真实注入过的 id）
+        demoted = _demote_ineffective(
+            reflection.get("demote") or {}, injected_memories,
+        )
 
         # 6. 审计日志（agent_reflections，MySQL 可用时）
         _write_audit(
@@ -191,8 +228,18 @@ def _run_reflection_sync(
 
 # ====== 写入分发 ======
 
-def _dispatch_longterm(reflection: dict[str, Any], user_query: str) -> int:
-    """长期记忆编辑 → memory/ 目录（只经安全闸，无 MySQL 依赖）。"""
+def _dispatch_longterm(reflection: dict[str, Any], user_query: str,
+                       trigger_reason: str) -> int:
+    """长期记忆编辑 → memory/ 目录（只经安全闸，无 MySQL 依赖）。
+
+    仅在用户明确纠正/反馈偏好时写入：长期记忆是"用户设定层"，multi_round /
+    tool_failure 等反思里 LLM 自行推测的"偏好"不可靠（宁少勿滥），也不是
+    用户确认过的内容。
+    """
+    if trigger_reason not in ("user_correction", "explicit_feedback"):
+        logger.debug("[reflection] 触发原因 %s 不写长期记忆（仅用户纠正/反馈可写）",
+                     trigger_reason)
+        return 0
     edits = reflection.get("longterm_edits") or []
     safe_edits = []
     for edit in edits:
@@ -234,6 +281,10 @@ def _dispatch_semantic(reflection: dict[str, Any], user_query: str) -> int:
         if violation:
             logger.warning("[reflection] 拦截不安全语义记忆（%s）：%s", violation, content[:80])
             continue
+        # 写入查重：新知识基本已被近期记忆覆盖 → 跳过（近重复只靠每周压缩兜底太慢）
+        if _semantic_duplicate(store, title, content):
+            logger.info("[reflection] 语义记忆与近期条目近重复，跳过：%s", title[:60])
+            continue
         tags = mem.get("tags") or []
         mem_id = store.add_semantic(
             title=title, content=content, source="reflection",
@@ -243,6 +294,23 @@ def _dispatch_semantic(reflection: dict[str, Any], user_query: str) -> int:
             created += 1
             _safe_call(_index_semantic, mem_id, title, content)
     return created
+
+
+def _semantic_duplicate(store: Any, title: str, content: str,
+                        threshold: float = 0.8) -> bool:
+    """新语义记忆的二元组被任一近期条目覆盖超阈值 → 判为近重复。"""
+    from agent.utils import text_coverage
+
+    try:
+        recent = store.list_semantic(limit=50)
+        new_text = f"{title}。{content}"
+        return any(
+            text_coverage(new_text,
+                          f"{r.get('title', '')}。{r.get('content', '')}") >= threshold
+            for r in recent
+        )
+    except Exception:
+        return False
 
 
 def _dispatch_episode(
@@ -337,34 +405,50 @@ def _dispatch_procedure(
     return 0
 
 
-def _demote_ineffective(demote: dict[str, Any]) -> int:
-    """效果闭环：注入后仍无效的记忆降权/删除。返回处理数。"""
+def _demote_ineffective(
+    demote: dict[str, Any],
+    injected_memories: list[dict[str, Any]] | None = None,
+) -> int:
+    """效果闭环：注入后仍无效的记忆降权/删除。返回处理数。
+
+    只允许处理本次请求真实注入过的 id（injected_memories）：demote 的 id
+    来自 LLM 输出，幻觉 id 若不校验会误删任意无关记忆且不可恢复。
+    """
+    def _valid_ids(raw: list[Any], allowed: set[int]) -> list[int]:
+        out = []
+        for i in raw:
+            try:
+                v = int(i)
+            except (TypeError, ValueError):
+                continue
+            if v in allowed:
+                out.append(v)
+        return out
+
+    injected = injected_memories or []
+    allowed_semantic = {it["id"] for it in injected if it.get("kind") == "semantic"}
+    allowed_procedure = {it["id"] for it in injected if it.get("kind") == "procedure"}
+
     demoted = 0
-    semantic_ids = demote.get("semantic_ids") or []
+    semantic_ids = _valid_ids(demote.get("semantic_ids") or [], allowed_semantic)
     if semantic_ids:
         try:
             from agent.memory.semantic_store import get_semantic_store
             store = get_semantic_store()
             for mid in semantic_ids:
-                try:
-                    if store.delete_semantic(int(mid)):
-                        _safe_call(_remove_semantic, int(mid))
-                        demoted += 1
-                except (TypeError, ValueError):
-                    continue
+                if store.delete_semantic(mid):
+                    _safe_call(_remove_semantic, mid)
+                    demoted += 1
         except Exception:
             pass
-    procedure_ids = demote.get("procedure_ids") or []
+    procedure_ids = _valid_ids(demote.get("procedure_ids") or [], allowed_procedure)
     if procedure_ids:
         try:
             from agent.memory.procedure_store import get_procedure_store
             store = get_procedure_store()
             for mid in procedure_ids:
-                try:
-                    store.demote(int(mid))
-                    demoted += 1
-                except (TypeError, ValueError):
-                    continue
+                store.demote(mid)
+                demoted += 1
         except Exception:
             pass
     return demoted
@@ -570,6 +654,15 @@ def _gate_violation(*texts: str) -> str | None:
         if factual:
             return f"事实冲突: {factual[:60]}"
     return None
+
+
+def check_memory_safety(*texts: str) -> str | None:
+    """公开安全闸入口：对任意来源（反思/治理 API/Curator）的待写记忆内容
+    执行三道文本闸（提示词注入/敏感信息/领域事实），通过返回 None。
+
+    手动治理路径必须与自动反思路径过同样的闸，避免"治理面比写入面更宽松"。
+    """
+    return _gate_violation(*texts)
 
 
 # ============ 记忆压缩（语义记忆 LLM 合并，Curator 复用）===========

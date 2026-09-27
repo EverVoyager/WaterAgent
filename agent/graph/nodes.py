@@ -79,10 +79,10 @@ def direct_chat_node(state: AgentState) -> dict[str, Any]:
     # 借鉴 Claude 原生 Skills：元数据始终可见，LLM 自然能回答"你有哪些技能"
     # 不使用"当用户询问X时..."硬编码规则（已废弃，改用 list_skills 工具 + 元信息上下文）
     system_content = DIRECT_CHAT_PROMPT
-    # 长期记忆常驻注入（用户手册 + Agent 自动积累，双层文件）
+    # 长期记忆常驻注入（手册+索引常驻，主题按 query 相关性展开——渐进式披露）
     try:
         from agent.memory import build_longterm_section
-        system_content += build_longterm_section()
+        system_content += build_longterm_section(query)
     except Exception as e:
         logger.debug("[direct_chat] 注入长期记忆失败（不影响主流程）：%s", e)
     try:
@@ -379,7 +379,7 @@ def _dedupe_planned_calls(
     return result
 
 
-def _build_planner_system_prompt() -> str:
+def _build_planner_system_prompt(query: str = "") -> str:
     """构建 planner system prompt（静态指令 + 长期记忆 + Skill 元信息）。
 
     请求内不变（KV Cache 前缀冻结），跨请求随记忆/Skill 变更整体失效。
@@ -426,10 +426,10 @@ def _build_planner_system_prompt() -> str:
         "清单时才调用；信息不足或犹豫时不得把它当默认动作——应选择最相关的"
         "业务工具，或在收集必要数据后返回空工具列表结束规划。\n"
     )
-    # 长期记忆常驻注入（用户手册 + Agent 自动积累，双层文件）
+    # 长期记忆常驻注入（手册+索引常驻，主题按 query 相关性展开——渐进式披露）
     try:
         from agent.memory import build_longterm_section
-        system_prompt += build_longterm_section()
+        system_prompt += build_longterm_section(query or None)
     except Exception as e:
         logger.debug("[planner] 注入长期记忆失败（不影响主流程）：%s", e)
     # 注入已启用 Skill 元信息（name + description）作为上下文
@@ -461,7 +461,7 @@ def _build_fc_round1_messages(
     消息——请求内不变，天然符合前缀"只增不改"；工具结果由后续轮的
     原生 tool 消息承载（原始 JSON 保真，不再压缩为文本摘要）。
     """
-    system_prompt = _build_planner_system_prompt()
+    system_prompt = _build_planner_system_prompt(query)
 
     sections = ""
     if skill_instructions:

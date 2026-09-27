@@ -259,7 +259,7 @@ class TestBuildOpenaiTools:
         """默认返回全部工具。"""
         from agent.tools.schemas import build_openai_tools
         tools = build_openai_tools()
-        assert len(tools) == 8  # 8 个内置工具（含 list_skills）
+        assert len(tools) == 9  # 9 个内置工具（含 list_skills、read_memory_topic）
 
     def test_subset_filter(self):
         """按工具子集过滤。"""
@@ -273,7 +273,7 @@ class TestBuildOpenaiTools:
         """空列表 = 全部工具。"""
         from agent.tools.schemas import build_openai_tools
         tools = build_openai_tools(tool_names=[])
-        assert len(tools) == 8
+        assert len(tools) == 9
 
     def test_invalid_tool_names_filtered(self):
         """无效工具名被过滤掉。"""
@@ -286,7 +286,7 @@ class TestBuildOpenaiTools:
         """None = 全部工具。"""
         from agent.tools.schemas import build_openai_tools
         tools = build_openai_tools(tool_names=None)
-        assert len(tools) == 8
+        assert len(tools) == 9
 
     def test_list_skills_included_by_default(self):
         """list_skills 工具默认包含在全部工具列表中。"""

@@ -1,7 +1,8 @@
 """Curator：自治记忆策展（五类记忆架构版，借鉴 Hermes Agent v0.12.0 Curator）。
 
 五步治理（周期后台线程执行，默认 7 天）：
-1. 剪枝：僵尸语义记忆（零命中超期）+ 超期情景归档 + deprecated 程序清理
+1. 剪枝：僵尸语义记忆（零命中超期）+ 超期情景归档（deprecated 程序不删除，
+   由 demote 置状态后停止注入，供审计追溯）
 2. 压缩：语义记忆 LLM 合并（高命中受保护门控不参与）
 3. 提炼：高复用程序的步骤 LLM 泛化（具体案例 → 通用步骤）
 4. 晋升：高复用高质量程序 → 自动生成候选 Skill（enabled=false 人工确认）
@@ -52,10 +53,15 @@ def run_curation_once() -> dict[str, int]:
             logger.warning("[curator] 语义剪枝失败：%s", e)
 
         try:
+            from agent.memory import vector_index
             from agent.memory.episode_store import get_episode_store
             ep_store = get_episode_store()
             if ep_store.enabled:
-                stats["archived_episodes"] = ep_store.delete_older_than(days=EPISODE_ARCHIVE_DAYS)
+                deleted_ids = ep_store.delete_older_than(days=EPISODE_ARCHIVE_DAYS)
+                stats["archived_episodes"] = len(deleted_ids)
+                # 同步删除向量点：MySQL 行已删，残留向量命中后取不回行
+                for eid in deleted_ids:
+                    vector_index.remove_episode(eid)
         except Exception as e:
             logger.warning("[curator] 情景归档失败：%s", e)
 
@@ -113,7 +119,8 @@ def run_curation_once() -> dict[str, int]:
 
 def _compact_semantic() -> int:
     """语义记忆 LLM 合并：低命中条目送压缩，高命中（>=10）受保护。"""
-    from agent.memory.reflection import _llm_compact_semantic
+    from agent.memory import vector_index
+    from agent.memory.reflection import _llm_compact_semantic, check_memory_safety
     from agent.memory.semantic_store import get_semantic_store
 
     store = get_semantic_store()
@@ -136,9 +143,17 @@ def _compact_semantic() -> int:
                       if str(i).isdigit()]
         content = str(item.get("content", "")).strip()
         if action in ("merge", "replace") and content and source_ids:
-            # 整合记忆以最新源条目的 title 为题（plan 未输出 title）
+            # 合并产物同样过安全闸：LLM 在合并时可能引入幻觉阈值断言，
+            # 不能因走 Curator 路径就绕过反思路径的事实校验
+            violation = check_memory_safety(content)
+            if violation:
+                logger.warning("[curator] 拦截不安全压缩产物（%s）：%s",
+                               violation, content[:80])
+                continue
+            # 整合记忆以 id 最大的源条目的 title 为题（取最大 id 而非列表末位，
+            # 不依赖 LLM 输出 source_ids 的顺序）
             newest_title = next(
-                (m.get("title", "") for m in memories if m["id"] == source_ids[-1]),
+                (m.get("title", "") for m in memories if m["id"] == max(source_ids)),
                 "整合知识",
             )
             new_id = store.add_semantic(
@@ -148,11 +163,12 @@ def _compact_semantic() -> int:
             if isinstance(new_id, int):
                 created += 1
                 deleted_ids.extend(source_ids)
+                # 立即建向量索引：否则合并成果要等下轮对账（最长 7 天）才可被检索
+                vector_index.index_semantic(new_id, newest_title, content)
         elif action == "keep":
             continue
     if deleted_ids:
         store.delete_many(deleted_ids)
-        from agent.memory import vector_index
         for mid in deleted_ids:
             vector_index.remove_semantic(mid)
     return created
@@ -160,7 +176,9 @@ def _compact_semantic() -> int:
 
 def _refine_procedures() -> int:
     """程序提炼：use_count>=3 且 refined_count<2 的程序，LLM 把步骤泛化为通用方法。"""
+    from agent.memory import vector_index
     from agent.memory.procedure_store import get_procedure_store
+    from agent.memory.reflection import check_memory_safety
     from agent.prompts.reflection import COMPACT_SYSTEM_PROMPT as _COMPACT
     from agent.utils import parse_json_from_llm
     from app.core.llm import LLM_TIMEOUTS, get_llm_client, get_llm_config, strip_think
@@ -200,11 +218,24 @@ def _refine_procedures() -> int:
             )
             result = parse_json_from_llm(
                 strip_think((resp.choices[0].message.content or "").strip()))
-            if isinstance(result, dict) and result.get("steps") and store.update_steps(
+            if not (isinstance(result, dict) and result.get("steps")):
+                continue
+            new_applicability = str(result.get("applicability", "")).strip()
+            # 提炼产物同样过安全闸（与反思路径一致，防 LLM 泛化时引入幻觉断言）
+            violation = check_memory_safety(
+                new_applicability, json.dumps(result["steps"], ensure_ascii=False))
+            if violation:
+                logger.warning("[curator] 拦截不安全提炼产物（%s）：proc id=%s",
+                               violation, proc["id"])
+                continue
+            if store.update_steps(
                 proc["id"], result["steps"],
-                applicability=str(result.get("applicability", "")) or None,
+                applicability=new_applicability or None,
             ):
                 refined += 1
+                # applicability 变了必须重 embed，否则向量仍对应旧文本，匹配劣化
+                vector_index.index_procedure(
+                    proc["id"], new_applicability or proc["applicability"])
         except Exception as e:
             logger.debug("[curator] 单个程序提炼失败 id=%s：%s", proc["id"], e)
     return refined

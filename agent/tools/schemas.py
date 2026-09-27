@@ -93,6 +93,16 @@ class ListSkillsParams(BaseModel):
     )
 
 
+class ReadMemoryTopicParams(BaseModel):
+    """读取 Agent 长期记忆中指定主题的完整内容。"""
+
+    topic: str = Field(
+        ...,
+        max_length=64,
+        description="主题名，须与 system prompt 长期记忆索引中的条目一致（如 'user-prefs'、'constraints'）",
+    )
+
+
 # ====== 工具描述常量 ======
 
 TOOL_DESCRIPTIONS = {
@@ -109,6 +119,12 @@ TOOL_DESCRIPTIONS = {
         "返回 JSON 数组，每个元素含 name/description/tool_names/enabled 字段。"
         "可选参数 include_instructions=true 可同时返回完整指令文本。"
     ),
+    "read_memory_topic": (
+        "读取 Agent 长期记忆中指定主题的完整内容（含 created/updated 日期）。"
+        "system prompt 的'长期记忆'段出于 token 预算只注入索引和与当前问题相关的主题；"
+        "当索引中某主题与当前任务相关但未展开、且其细节可能影响回答时，"
+        "用主题名调用本工具读取全文。主题不存在时返回 found=false。"
+    ),
 }
 
 # 工具名 → 参数模型 的映射
@@ -121,6 +137,7 @@ TOOL_PARAM_MODELS = {
     "web_search": WebSearchParams,
     "generate_plan": GeneratePlanParams,
     "list_skills": ListSkillsParams,
+    "read_memory_topic": ReadMemoryTopicParams,
 }
 
 

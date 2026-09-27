@@ -81,6 +81,8 @@ REFLECTION_SYSTEM_PROMPT = """你是防汛预警 Agent 的反思模块。基于�
 - longterm_edits 的 topic 用小写短横线命名（如 user-prefs）；content 是陈述句，多条同类可合并为一次 append
 - semantic_memories 必须含具体数值/规则，笼统表述不要
 - steps 的 action 是动宾短语（如"获取实时水情"），tool 是工具名（可为 null）
+- 时间敏感信息必须写绝对日期（如"2026-09-26 阈值调整为..."），严禁"目前/当前/最近/今天"
+  这类相对表述——记忆会跨会话长期存在，相对时间随记忆老化变成误导
 
 【质量评分（class-first，宁缺毋滥）】
 每条 longterm_edits / semantic_memories 写入前自评：

@@ -290,16 +290,17 @@ START → **planner**（Function Calling 规划 + 信息充分性判断）
 | 记忆类型 | 承载 | 注入点 |
 |---|---|---|
 | 会话记忆 | chat_sessions/messages + 上下文压缩 | planner / synthesizer（历史摘要） |
-| 长期记忆 | `MEMORY.md`（用户手册，Agent 只读）+ `memory/` 目录（Agent 自动记忆，索引+主题文件） | 三处 system prompt 常驻 |
-| 语义记忆 | `agent_semantic` 表 + Qdrant | synthesizer「领域知识」top-3 |
-| 情景记忆 | `agent_episodes` 表 + Qdrant | planner「历史类似情形」top-2 |
-| 程序记忆 | `agent_procedures` 表 + Qdrant | planner「推荐方法」top-2 |
+| 长期记忆 | `MEMORY.md`（用户手册，Agent 只读）+ `memory/` 目录（Agent 自动记忆，索引+主题文件，frontmatter 带 created/updated） | 手册+索引三处常驻，主题按 query 相关性在预算内展开（渐进式披露）；`read_memory_topic` 工具按需读全文 |
+| 语义记忆 | `agent_semantic` 表 + Qdrant | synthesizer「领域知识」top-3（带日期标注） |
+| 情景记忆 | `agent_episodes` 表 + Qdrant | planner「历史类似情形」top-2（带日期标注） |
+| 程序记忆 | `agent_procedures` 表 + Qdrant | planner「推荐方法」top-2（带日期标注） |
 
-- **反思分发**：用户纠正 / 工具失败 / 多轮解决等触发异步反思，LLM 输出分发到长期（文件）/ 语义 / 情景 / 程序四类存储；写入三道安全闸（提示词注入扫描、敏感信息过滤、rubric 质量门槛）
+- **反思分发**：用户纠正 / 工具失败 / 多轮解决等触发异步反思（滚动窗口限流），LLM 输出分发到长期（文件）/ 语义 / 情景 / 程序四类存储；长期记忆仅在用户纠正/反馈偏好时写入（multi_round 推测的偏好不写），写入三道安全闸（提示词注入扫描、敏感信息过滤、rubric 质量门槛）+ 近重复查重
+- **读时安全闸**：长期主题与语义/情景/程序记忆在注入前对照当前 `WARNING_THRESHOLDS` 复检领域事实断言——阈值调整后，含旧断言的记忆立即停止注入（过期可发现）
 - **程序记忆成长闭环**：反思写入具体模式 → Curator 周期提炼为通用步骤（LLM 泛化）→ 高复用高质量程序自动晋升候选 Skill（`enabled=false` 人工确认启用）
-- **效果闭环**：注入记忆线程级追踪，请求完成后计数（语义 hit_count / 程序 use_count+success_count），反思可 demote 无效记忆
-- **Curator 五步治理**（周期后台线程）：剪枝僵尸记忆 → 语义压缩合并 → 程序提炼 → 晋升检查 → 向量索引对账 + memory/ 目录索引修复
-- **治理 API**：`/api/memories/*` 支持手册读写、自动记忆主题编辑、语义/情景/程序查询删除、手动晋升、反思审计
+- **效果闭环**：注入记忆线程级追踪，请求完成后计数（语义 hit_count / 程序 use_count+success_count），反思可 demote 无效记忆（仅限本次真实注入过的 id）
+- **Curator 五步治理**（周期后台线程）：剪枝僵尸记忆 → 语义压缩合并 → 程序提炼 → 晋升检查 → 向量索引对账 + memory/ 目录索引修复（含孤儿索引行清理）
+- **治理 API**：`/api/memories/*` 支持手册读写、自动记忆主题编辑、语义/情景/程序查询删除、手动晋升、反思审计；`MEMORY_ADMIN_API_KEY` 非空时要求 X-API-Key
 - **降级**：MySQL 未配置时长期记忆（文件）仍可用，其余类型自动禁用
 
 #### Skill 系统
