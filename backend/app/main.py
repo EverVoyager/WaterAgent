@@ -14,7 +14,7 @@ if _BACKEND_ROOT not in sys.path:
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi import _rate_limit_exceeded_handler
@@ -26,9 +26,11 @@ from app.api.health import router as health_router
 from app.api.memories import router as memories_router
 from app.api.sessions import router as sessions_router
 from app.api.skills import router as skills_router
+from app.core.auth import require_access_key
 from app.core.config import get_settings
 from app.core.logging import setup_logging
 from app.core.rate_limit import limiter
+from app.core.request_context import RequestIDMiddleware
 
 
 @asynccontextmanager
@@ -46,8 +48,17 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     """应用工厂。"""
-    # P4.1：尽早初始化 structlog，后续日志都走结构化
-    setup_logging()
+    settings = get_settings()
+
+    # P4.1：尽早初始化统一日志管道（structlog + stdlib 同出口同格式，
+    # LOG_JSON / LOG_LEVEL / LOG_FILE 由配置驱动）
+    setup_logging(
+        json_mode=settings.LOG_JSON,
+        level=settings.LOG_LEVEL,
+        log_file=settings.LOG_FILE,
+        log_file_max_mb=settings.LOG_FILE_MAX_MB,
+        log_file_backup_count=settings.LOG_FILE_BACKUP_COUNT,
+    )
 
     settings = get_settings()
 
@@ -56,6 +67,7 @@ def create_app() -> FastAPI:
         version=settings.APP_VERSION,
         description="黄河吕梁段防汛预警智能体后端服务",
         lifespan=lifespan,
+        dependencies=[Depends(require_access_key)],
     )
 
     # ====== Rate Limiting（P1.2 slowapi）======
@@ -79,8 +91,13 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         # production 收紧方法：只允许业务需要的
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"] if settings.is_production else ["*"],
-        allow_headers=["Content-Type", "Authorization"] if settings.is_production else ["*"],
+        allow_headers=["Content-Type", "Authorization", "X-API-Key"] if settings.is_production else ["*"],
     )
+
+    # ====== request_id 贯穿（P7 可观测性）======
+    # 最后注册 = 最外层：覆盖 CORS / 限流及 SSE 流式全程，
+    # 请求内所有日志（structlog + stdlib）携带 request_id，响应头回传 X-Request-ID
+    app.add_middleware(RequestIDMiddleware)
 
     # ====== 路由注册 ======
     app.include_router(health_router)
@@ -88,6 +105,11 @@ def create_app() -> FastAPI:
     app.include_router(skills_router)
     app.include_router(memories_router)
     app.include_router(sessions_router)
+
+    @app.get("/api/access", tags=["access"])
+    def check_access():
+        """前端启动前验证访问钥匙，避免未授权时加载会话。"""
+        return {"ok": True}
 
     # ====== 全局异常处理（P2 异常分类）======
     @app.exception_handler(Exception)

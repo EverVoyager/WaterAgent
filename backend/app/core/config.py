@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     APP_NAME: str = "water-agents"
     APP_VERSION: str = "0.1.0"
     APP_ENV: str = "development"  # development / production
+    API_ACCESS_KEY: str = ""  # 共享访问钥匙，production 必填；不放入前端构建环境
 
     # 后端服务
     BACKEND_HOST: str = "0.0.0.0"
@@ -79,6 +80,16 @@ class Settings(BaseSettings):
 
     # Rate Limiting（slowapi）
     RATE_LIMIT_PER_MINUTE: int = 30
+
+    # 日志（structlog 前端 + stdlib 后端统一管道，stdout + 可选文件轮转）
+    # DEBUG 可查看 SSE 事件级轨迹与工具执行细节
+    LOG_LEVEL: str = "INFO"
+    # JSON 模式适合 ELK / Loki 采集；false 为彩色 Console（开发）
+    LOG_JSON: bool = False
+    # 日志文件路径（空 = 仅 stdout；配置后启用 RotatingFileHandler 轮转）
+    LOG_FILE: str = ""
+    LOG_FILE_MAX_MB: int = 50
+    LOG_FILE_BACKUP_COUNT: int = 5
 
     # 上下文 token 压缩（借鉴 Codex compact.rs）
     # history 总 token 超过此值时触发压缩。
@@ -153,6 +164,8 @@ class Settings(BaseSettings):
             return self
 
         issues = []
+        if self.API_ACCESS_KEY.strip() in _PLACEHOLDER_KEYS:
+            issues.append("API_ACCESS_KEY 未配置（production 模式必需）")
         if self.LLM_API_KEY in _PLACEHOLDER_KEYS:
             issues.append("LLM_API_KEY 未配置（不能为空或占位符）")
         if self.AMAP_API_KEY in _PLACEHOLDER_KEYS:

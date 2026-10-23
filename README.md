@@ -140,6 +140,11 @@ LLM_MODEL=wateragents-qwen3-4b-v1          # 与推理配置中的模型名一�
 
 #### 1. 配置后端
 
+共享部署需要配置 `API_ACCESS_KEY`。`APP_ENV=production` 时缺少钥匙会拒绝启动，
+Docker Compose 也要求设置此项。进入网页时输入钥匙，仅保存在当前标签页的 sessionStorage；
+直接调用 API 时携带 `X-API-Key` 请求头。`/api/health` 探针无需钥匙。
+这是共享工作区访问控制，持有同一钥匙的成员共享会话和技能；本地 development 留空时不鉴权，勿对外开放。
+
 ```bash
 cd backend
 cp .env.example .env
@@ -252,6 +257,8 @@ curl -X POST http://localhost:8000/api/agent/query \
 | `CURATOR_ENABLED` / `CURATOR_INTERVAL_HOURS` | `true` / `168` | 记忆定期治理（剪枝 / 压缩 / 对账）                                  |
 | `HISTORY_MAX_TOKENS`                           | `4000`           | 超过即触发历史 LLM 摘要压缩                                         |
 | `RATE_LIMIT_PER_MINUTE`                        | `30`             | slowapi 限流                                                        |
+| `LOG_LEVEL` / `LOG_JSON`                      | `INFO` / `false` | 日志级别（DEBUG 可见 SSE 事件留痕）/ JSON 模式（ELK 采集）          |
+| `LOG_FILE`                                     | 空               | 日志落盘路径，非空启用大小轮转（`LOG_FILE_MAX_MB`/`LOG_FILE_BACKUP_COUNT`） |
 | `APP_ENV`                                      | `development`    | `production` 下关键工具真实源失败**硬失败**、校验占位符 Key |
 
 ### 核心设计
@@ -341,7 +348,7 @@ START → **planner**（Function Calling 规划 + 信息充分性判断）
 | 思考内容剥离 | `strip_think` 移除 `<think>` 块，流式 / 非流式全路径覆盖                           |
 | 前缀缓存     | KV Cache 友好上下文工程（静态前缀冻结 + 只追加 + 命中率观测），DeepSeek/MaaS/vLLM 三后端通用 |
 | 前端 UI      | 无 UI 库，自写组件（Toast / 会话侧栏 / 预警卡 / 引用卡），Codex 风格                   |
-| 结构化日志   | structlog（JSON / Console 双模式）；LangFuse 可选追踪                                  |
+| 结构化日志   | structlog + stdlib 统一管道；request_id 全链路贯穿（含 SSE worker / 工具线程池，X-Request-ID 响应头回传），JSON / Console 双模式 + 文件轮转 |
 | 安全         | slowapi 限流 + production CORS 收紧 + 占位符 Key 校验 + Skill 导入防护                 |
 
 ### 系统架构
@@ -385,8 +392,7 @@ WaterAgents/
 │   ├── data/                       # 实时数据源（水文爬虫/高德天气/Tavily）
 │   ├── gis/                        # GIS 地形分析（SRTM DEM + rasterio）
 │   ├── memory/                     # 五类记忆（longterm/semantic/episode/procedure）+ Curator
-│   ├── prompts/                    # 系统提示词（分模块）
-│   └── tracing/                    # LangFuse 追踪
+│   └── prompts/                    # 系统提示词（分模块）
 ├── train/                          # 微调管线（data_gen/lora/grpo/rewards/eval/tests）
 ├── evals/                          # 系统级评估（用例/回放/指标/Judge/消融/回归门禁）
 ├── models/                         # 微调产物（合并权重，gitignore）
@@ -403,6 +409,10 @@ WaterAgents/
 ```
 
 ## 测试与质量
+
+数据库测试固定使用 `water_agent_test`，不会备份或清空业务库。
+需要实跑 MySQL 用例时先创建此专用空库；可用 `TEST_MYSQL_DATABASE` 指定其他以 `_test` 结尾的测试库。
+未配置 `MYSQL_PASSWORD` 时跳过数据库用例；CI 会创建专用测试库。
 
 ```bash
 # 后端 + 训练管线（MySQL 未配置时相关用例自动跳过）

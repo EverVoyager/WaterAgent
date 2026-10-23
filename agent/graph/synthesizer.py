@@ -44,6 +44,7 @@ def _extract_rain(tool_results: dict[str, Any]) -> float:
 
 def _extract_water_level_status(tool_results: dict[str, Any]) -> str:
     """判断水位状态：normal / warning / guaranteed。"""
+    status = "unknown"
     for _, val in tool_results.items():
         if not isinstance(val, dict):
             continue
@@ -55,9 +56,10 @@ def _extract_water_level_status(tool_results: dict[str, Any]) -> str:
         if guar is not None and level >= guar:
             return "guaranteed"
         if warn is not None and level >= warn:
-            return "warning"
-        return "normal"
-    return "unknown"
+            status = "warning"
+        elif status == "unknown":
+            status = "normal"
+    return status
 
 
 def compute_warning_level(tool_results: dict[str, Any]) -> tuple[str, str]:

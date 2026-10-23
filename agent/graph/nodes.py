@@ -3,6 +3,7 @@
 从 workflow.py 拆分而来。依赖 state, errors, cache, llm_helpers, synthesizer_node,
 agent.prompts, app.core.llm。
 """
+import contextvars
 import json
 import logging
 from collections import Counter
@@ -593,7 +594,7 @@ def _plan_via_fc(
 def _execute_one_tool(
     call: dict[str, Any],
     idx: int,
-    weather_rainfall_mm: float,
+    weather_rainfall_mm: float | None,
     weather_series: list[dict] | None,
     round_num: int,
     existing_keys: set,
@@ -614,10 +615,11 @@ def _execute_one_tool(
                 "is_weather": False}
 
     # 跨工具数据流：predict_runoff 自动注入降雨量
-    if name == "predict_runoff" and weather_rainfall_mm > 0:
-        args.setdefault("rainfall_mm", weather_rainfall_mm)
-        if weather_series:
-            args.setdefault("rainfall_series", weather_series)
+    if name == "predict_runoff" and weather_rainfall_mm is not None:
+        if args.get("rainfall_mm") is None:
+            args["rainfall_mm"] = weather_rainfall_mm
+        if weather_series and args.get("rainfall_series") is None:
+            args["rainfall_series"] = weather_series
         logger.info(
             "[executor] predict_runoff 注入降雨数据: rainfall_mm=%.1f",
             weather_rainfall_mm,
@@ -660,14 +662,14 @@ def _execute_one_tool(
     }
 
 
-def _collect_weather_context(tool_results: dict[str, Any]) -> tuple[float, list[dict] | None]:
+def _collect_weather_context(tool_results: dict[str, Any]) -> tuple[float | None, list[dict] | None]:
     """从历史工具结果中提取 get_weather 的降雨数据（用于跨工具数据流注入）。"""
-    for k, v in tool_results.items():
-        if k.startswith("get_weather") and isinstance(v, dict):
-            rainfall_mm = float(v["total_rainfall_mm"]) if v.get("total_rainfall_mm") else 0.0
+    for k, v in reversed(list(tool_results.items())):
+        if k.startswith("get_weather") and isinstance(v, dict) and v.get("total_rainfall_mm") is not None:
+            rainfall_mm = float(v["total_rainfall_mm"])
             series = v.get("series")
             return rainfall_mm, series
-    return 0.0, None
+    return None, None
 
 
 def _partition_stages(planned: list[dict[str, Any]]) -> tuple[list[tuple], list[tuple]]:
@@ -691,7 +693,7 @@ def _partition_stages(planned: list[dict[str, Any]]) -> tuple[list[tuple], list[
 
 def _run_stage(
     stage_items: list[tuple],
-    weather_rainfall_mm: float,
+    weather_rainfall_mm: float | None,
     weather_series: list[dict] | None,
     round_num: int,
     existing_keys: set,
@@ -710,8 +712,12 @@ def _run_stage(
         return [_execute_one_tool(c, i, weather_rainfall_mm, weather_series,
                                   round_num, existing_keys, duplicate_names)]
     # 多工具并发
+    # 每个任务独立 copy_context：contextvars（含 request_id 日志上下文）不随
+    # 线程池自动继承，拷贝后线程内工具日志与调用方同上下文；注意不能多个
+    # 任务共享同一个 Context（并发 run 会抛 RuntimeError），必须逐任务拷贝
     futures = [
         _TOOL_EXECUTOR.submit(
+            contextvars.copy_context().run,
             _execute_one_tool, c, i, weather_rainfall_mm, weather_series,
             round_num, existing_keys, duplicate_names,
         )
@@ -730,7 +736,7 @@ def _apply_stage_results(
     existing_keys: set,
     round_num: int,
     update_weather: bool = False,
-) -> tuple[float, list[dict] | None]:
+) -> tuple[float | None, list[dict] | None]:
     """把阶段执行结果回填到 tool_results 和 tool_calls。
 
     Args:
@@ -738,7 +744,7 @@ def _apply_stage_results(
     Returns:
         (weather_rainfall_mm, weather_series) — 仅在 update_weather=True 时有意义。
     """
-    weather_rainfall_mm = 0.0
+    weather_rainfall_mm = None
     weather_series: list[dict] | None = None
     for r in results:
         tool_results[r["result_key"]] = r["result"]
@@ -751,9 +757,9 @@ def _apply_stage_results(
             "tc_id": r.get("tc_id", ""),
         })
         if update_weather and r["is_weather"]:
-            if r["result"].get("total_rainfall_mm"):
+            if r["result"].get("total_rainfall_mm") is not None:
                 weather_rainfall_mm = float(r["result"]["total_rainfall_mm"])
-            if r["result"].get("series"):
+            if r["result"].get("series") is not None:
                 weather_series = r["result"]["series"]
         existing_keys.add(r["result_key"])
     return weather_rainfall_mm, weather_series
@@ -799,7 +805,7 @@ def executor_node(state: AgentState) -> dict[str, Any]:
         stage1_results, tool_results, tool_calls, existing_keys,
         round_num, update_weather=True,
     )
-    if new_rain > 0:
+    if new_rain is not None:
         weather_rainfall_mm = new_rain
     if new_series is not None:
         weather_series = new_series

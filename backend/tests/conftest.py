@@ -1,51 +1,34 @@
 """pytest 全局 fixtures。"""
-import contextlib
+import os
 import sys
 from pathlib import Path
 
 # 确保项目根目录在 sys.path 中（agent 模块在项目根，不在 backend/ 下）
-_PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
-if _PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, _PROJECT_ROOT)
+for _path in (Path(__file__).resolve().parents[2], Path(__file__).resolve().parents[1]):
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
 
 import pytest
 
-from agent.skills.models import SkillCreate
+# 必须在 Settings 首次加载前切换，测试绝不备份/清空业务库。
+os.environ["MYSQL_DATABASE"] = os.environ.get("TEST_MYSQL_DATABASE", "water_agent_test")
+
 from agent.skills.skill_store import get_skill_store, is_skill_store_enabled
+from app.core.config import get_settings
 
 
 @pytest.fixture(autouse=True)
 def _restore_skills_table():
-    """测试前后保持 skills 表数据不变（备份 → 测试 → 恢复）。
-
-    避免 pytest 清空生产数据。仅在 MySQL 可用时执行。
-    """
+    """只清理专用测试库，数据库故障立即报错。"""
     if not is_skill_store_enabled():
         yield
         return
 
+    if not get_settings().MYSQL_DATABASE.endswith("_test"):
+        pytest.fail("测试数据库名称必须以 _test 结尾，拒绝清理业务库")
     store = get_skill_store()
-    # 备份现有数据（建表失败等由具体测试处理）
-    backup = []
-    with contextlib.suppress(Exception):
-        backup = store.list_skills(enabled_only=False)
-
-    # 测试前清空（隔离）
-    with contextlib.suppress(Exception):
-        store.delete_all()
-
-    yield
-
-    # 测试后恢复原数据
+    store.delete_all()
     try:
+        yield
+    finally:
         store.delete_all()
-        for skill in backup:
-            store.create_skill(SkillCreate(
-                name=skill.name,
-                description=skill.description,
-                instructions=skill.instructions,
-                tool_names=skill.tool_names,
-                enabled=skill.enabled,
-            ))
-    except Exception:
-        pass  # 恢复失败不阻塞测试退出

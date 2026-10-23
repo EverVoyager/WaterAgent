@@ -21,12 +21,12 @@ import zipfile
 from dataclasses import dataclass
 
 from agent.skills.matcher import invalidate_cache
-from agent.skills.models import Skill, SkillCreate
+from agent.skills.models import Skill, SkillCreate, SkillUpdate
 from agent.skills.parser import (
     filter_tools_by_whitelist,
     parse_skill_md,
 )
-from agent.skills.store import create_skill, delete_skill, get_skill
+from agent.skills.store import create_skill, get_skill, update_skill
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +91,6 @@ def import_skill_from_md(
     existing = get_skill(normalized_name)
     if existing is not None:
         if conflict_strategy == "overwrite":
-            delete_skill(normalized_name)
             action = "overwritten"
         elif conflict_strategy == "rename":
             final_name = _generate_unique_name(normalized_name)
@@ -113,7 +112,10 @@ def import_skill_from_md(
     except Exception as e:
         raise ValueError(f"Skill 数据校验失败: {e}") from e
 
-    skill = create_skill(req)
+    if action == "overwritten":
+        skill = update_skill(final_name, SkillUpdate(**req.model_dump()))
+    else:
+        skill = create_skill(req)
     invalidate_cache()
 
     logger.info(

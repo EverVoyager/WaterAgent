@@ -14,6 +14,7 @@ RUN pip install --no-cache-dir torch==2.5.1 --index-url https://download.pytorch
 # 只复制训练需要的目录（.dockerignore 会进一步排除 .env / models / saves 等）
 COPY train/ ./train/
 COPY agent/ ./agent/
+COPY config/ ./config/
 COPY backend/app/ ./backend/app/
 COPY data/raw/regulations/ ./data/raw/regulations/
 

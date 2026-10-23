@@ -80,7 +80,7 @@ def _handle_store_error(e: Exception):
 # ====== 路由 ======
 
 @router.get("", response_model=SessionListResponse)
-async def list_sessions():
+def list_sessions():
     """列出所有会话（含消息，前端启动时全量加载）。"""
     _ensure_enabled()
     try:
@@ -97,7 +97,7 @@ async def list_sessions():
 
 
 @router.post("", response_model=SessionResponse, status_code=201)
-async def create_session(req: CreateSessionRequest):
+def create_session(req: CreateSessionRequest):
     """创建会话。"""
     _ensure_enabled()
     try:
@@ -114,7 +114,7 @@ async def create_session(req: CreateSessionRequest):
 
 
 @router.get("/{session_id}", response_model=SessionResponse)
-async def get_session(session_id: str):
+def get_session(session_id: str):
     """获取单个会话（含消息）。"""
     _ensure_enabled()
     try:
@@ -130,7 +130,7 @@ async def get_session(session_id: str):
 
 
 @router.put("/{session_id}", response_model=SessionResponse)
-async def sync_session(session_id: str, req: SyncSessionRequest):
+def sync_session(session_id: str, req: SyncSessionRequest):
     """全量同步会话：更新标题 + 替换所有消息。
 
     用于前端 persistActiveSession：流式完成后一次性同步整个会话状态。
@@ -150,7 +150,7 @@ async def sync_session(session_id: str, req: SyncSessionRequest):
 
 
 @router.patch("/{session_id}")
-async def update_title(session_id: str, req: UpdateTitleRequest):
+def update_title(session_id: str, req: UpdateTitleRequest):
     """更新会话标题。"""
     _ensure_enabled()
     try:
@@ -165,7 +165,7 @@ async def update_title(session_id: str, req: UpdateTitleRequest):
 
 
 @router.delete("/{session_id}")
-async def delete_session(session_id: str):
+def delete_session(session_id: str):
     """删除会话（级联删除消息）。"""
     _ensure_enabled()
     try:

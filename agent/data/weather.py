@@ -43,9 +43,9 @@ def _normalize_rainfall(weather_desc: str) -> float:
     """从天气描述提取降雨强度（mm/h）。"""
     if not weather_desc:
         return 0.0
-    for key, val in RAINFALL_MAP.items():
+    for key in sorted(RAINFALL_MAP, key=len, reverse=True):
         if key in weather_desc:
-            return val
+            return RAINFALL_MAP[key]
     return 0.0
 
 
@@ -122,6 +122,10 @@ def _build_hourly_series(live: dict[str, Any], casts: list[dict[str, Any]], hour
         (series, total_rainfall_mm, max_hourly_rainfall_mm)
     """
     base_time = datetime.now(timezone.utc)
+    china_tz = timezone(timedelta(hours=8))
+    if not casts:
+        raise RuntimeError("高德预报缺少逐日天气数据")
+    casts_by_date = {cast.get("date"): cast for cast in casts}
     total_rain = 0.0
     max_rain = 0.0
     series: list[dict[str, Any]] = []
@@ -142,14 +146,14 @@ def _build_hourly_series(live: dict[str, Any], casts: list[dict[str, Any]], hour
 
     # 第 1 小时到 hours：从 casts 展开
     for hour_offset in range(1, hours):
-        # 计算落在哪一天（cast 索引 0=今天, 1=明天...）
-        day_idx = hour_offset // 24
-        if day_idx >= len(casts):
-            day_idx = len(casts) - 1
-        cast = casts[day_idx]
+        # 高德日期及昼夜均使用北京时间。
+        local_time = (base_time + timedelta(hours=hour_offset)).astimezone(china_tz)
+        cast = casts_by_date.get(local_time.date().isoformat())
+        if cast is None:
+            raise RuntimeError(f"高德预报缺少 {local_time.date()} 的天气数据")
 
         # 一天内小时分布：白天用 daytemp/dayweather，夜间用 nighttemp/nightweather
-        hour_of_day = hour_offset % 24
+        hour_of_day = local_time.hour
         if 6 <= hour_of_day < 18:
             weather_desc = cast.get("dayweather", "")
             temp = float(cast.get("daytemp", "20"))

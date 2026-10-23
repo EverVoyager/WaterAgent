@@ -1,4 +1,5 @@
 import axios, { type AxiosInstance } from 'axios'
+import { accessHeaders } from './access'
 
 const baseURL = import.meta.env.VITE_API_BASE_URL || '/api'
 
@@ -13,6 +14,7 @@ const instance: AxiosInstance = axios.create({
 // 请求拦截器
 instance.interceptors.request.use(
   (config) => {
+    Object.assign(config.headers, accessHeaders())
     return config
   },
   (error) => {

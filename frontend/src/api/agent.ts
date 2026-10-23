@@ -1,3 +1,5 @@
+import { accessHeaders } from './access'
+
 export interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
@@ -142,7 +144,7 @@ export function queryAgentStream(
   // 使用 fetch 而非 axios，因为 axios 不原生支持 stream
   fetch(`${baseURL}/agent/query/stream`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...accessHeaders() },
     body: JSON.stringify(req),
     signal: controller.signal,
   })

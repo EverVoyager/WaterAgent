@@ -70,10 +70,10 @@ def test_synthesize_one_gives_up_at_max_rounds():
 def test_resume_skips_completed(tmp_path: Path):
     out = tmp_path / "raw.jsonl"
     scn1, scn2 = generate_scenarios(n=2, seed=11)[:2]
-    out.write_text(json.dumps({"scenario_id": scn1.scenario_id, "messages": []}, ensure_ascii=False) + "\n")
+    out.write_text(json.dumps({"scenario_id": scn1.scenario_id, "messages": []}, ensure_ascii=False) + "\n", encoding="utf-8")
     client = MagicMock()
     client.chat.completions.create.return_value = _text_response("Ⅳ级，水情平稳。")
     written = synthesize_dataset(client, "m", [scn1, scn2], out, rpm=10000)
     assert written == 1  # scn1 已存在被跳过
-    lines = out.read_text().strip().splitlines()
+    lines = out.read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 2

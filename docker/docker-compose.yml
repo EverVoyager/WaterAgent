@@ -64,6 +64,7 @@ services:
     env_file: .env
     environment:
       LLM_API_KEY: ${LLM_API_KEY}
+      API_ACCESS_KEY: ${API_ACCESS_KEY:?请在 docker/.env 设置共享访问钥匙 API_ACCESS_KEY}
       LLM_BASE_URL: ${LLM_BASE_URL}
       LLM_MODEL: ${LLM_MODEL}
       # Embedding 独立凭证（留空回退 LLM_*；推理与 embedding 分属不同服务商时必填）

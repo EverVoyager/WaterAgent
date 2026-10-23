@@ -10,6 +10,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from agent.graph.workflow import LLMError, run_graph_agent, run_graph_agent_stream_v2
+from app.core.logging import bind_context, clear_context
+from app.core.request_context import get_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -129,12 +131,22 @@ def _sse_keepalive_comment() -> str:
     return ": keep-alive\n\n"
 
 
-def _stream_generator(query: str, history: list):
-    """SSE 事件生成器（P5 加心跳保活 + 断连协作式取消）。
+# SSE 事件旁路日志的截断长度（synth_meta/done 含完整答案，日志侧只留指纹）
+_SSE_LOG_TRUNCATE = 800
+
+
+def _stream_generator(query: str, history: list, request_id: str = ""):
+    """SSE 事件生成器（P5 加心跳保活 + 断连协作式取消 + P7 事件留痕）。
 
     使用独立线程跑 Agent，主线程定期发心跳避免连接超时。
     客户端断开时生成器被 Starlette 关闭（GeneratorExit），在 finally 中
     set cancel_event 让 Agent 在轮次/token 流边界提前退出，避免浪费 LLM token。
+
+    P7 可追溯性：
+    - worker 线程不继承 asyncio 任务的 contextvars，需显式 bind request_id，
+      Agent 全程（planner/executor/synthesizer 及工具线程池）的日志因此可归组
+    - 每条推给前端的事件旁路记一条 DEBUG 日志（answer_delta 除外，量大且
+      内容可由累积正文还原），服务端日志与前端所见可对账
     """
     # 用 queue 把 Agent 事件传到主线程
     import queue
@@ -145,6 +157,8 @@ def _stream_generator(query: str, history: list):
     cancel_event = threading.Event()
 
     def _agent_worker():
+        if request_id:
+            bind_context(request_id=request_id)
         try:
             for event in run_graph_agent_stream_v2(
                 user_query=query, history=history, cancel_event=cancel_event,
@@ -161,11 +175,15 @@ def _stream_generator(query: str, history: list):
             logger.exception("[sse] 流式生成失败")
             event_queue.put({"type": "error", "message": str(e)})
         finally:
+            clear_context()
             event_queue.put(_sentinel)
 
     worker_thread = threading.Thread(target=_agent_worker, daemon=True)
     worker_thread.start()
 
+    start_ts = time.time()
+    event_count = 0
+    delta_count = 0
     last_emit = time.time()
     try:
         while True:
@@ -180,6 +198,14 @@ def _stream_generator(query: str, history: list):
 
             if item is _sentinel:
                 break
+            # 事件留痕：DEBUG 级，排查「前端少显示一步」时与服务端日志对账
+            if item.get("type") == "answer_delta":
+                delta_count += 1
+            else:
+                event_count += 1
+                logger.debug(
+                    "[sse] event: %s", json.dumps(item, ensure_ascii=False)[:_SSE_LOG_TRUNCATE]
+                )
             yield _sse_event(item)
             last_emit = time.time()
     finally:
@@ -187,6 +213,10 @@ def _stream_generator(query: str, history: list):
             # 生成器提前结束（客户端断开 / 异常）：通知 worker 在循环边界取消
             cancel_event.set()
             logger.info("[sse] stream ended before agent finished, cancelling worker")
+        logger.info(
+            "[sse] stream finished: events=%d answer_deltas=%d duration=%.1fs cancelled=%s",
+            event_count, delta_count, time.time() - start_ts, cancel_event.is_set(),
+        )
 
 
 @router.post("/query/stream")
@@ -207,7 +237,7 @@ def agent_query_stream(req: AgentQueryRequest) -> StreamingResponse:
     logger.info("Agent query (stream v2): %s", req.query[:200])
     history = [m.model_dump() for m in req.history]
     return StreamingResponse(
-        _stream_generator(req.query, history),
+        _stream_generator(req.query, history, request_id=get_request_id()),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
