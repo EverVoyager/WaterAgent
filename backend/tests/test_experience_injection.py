@@ -13,12 +13,9 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from agent.graph.direct_chat_stream import _direct_chat_stream
-from agent.graph.nodes import direct_chat_node
-from agent.graph.synthesizer_node import (
-    _build_synth_messages,
-    synthesizer_node,
-)
+from agent.graph.direct_chat_stream import _direct_chat_stream, direct_chat_node
+from agent.graph.synthesis.context import _build_synth_messages
+from agent.graph.synthesizer_node import synthesizer_node
 
 _EXP = "【情景记忆】红旗沟水库按 120 立方米每秒预泄。"
 _TOOL_RESULTS = {"get_hydrology": {"station": "吴堡", "flow_m3_s": 1200}}
@@ -92,7 +89,7 @@ class TestDirectChatInjection:
     def test_experiences_in_user_tail_not_system(self):
         client = _FakeClient()
         patches = _no_side_injections() + [
-            patch("agent.graph.nodes.get_llm_client", return_value=client),
+            patch('agent.graph.direct_chat_stream.get_llm_client', return_value=client),
         ]
         _enter_all(patches)
         try:
@@ -115,7 +112,7 @@ class TestDirectChatInjection:
         for exp in ("", _EXP):
             client = _FakeClient()
             patches = _no_side_injections() + [
-                patch("agent.graph.nodes.get_llm_client", return_value=client),
+                patch('agent.graph.direct_chat_stream.get_llm_client', return_value=client),
             ]
             _enter_all(patches)
             try:
@@ -130,7 +127,7 @@ class TestDirectChatInjection:
     def test_recalled_context_still_appended(self):
         client = _FakeClient()
         patches = _no_side_injections() + [
-            patch("agent.graph.nodes.get_llm_client", return_value=client),
+            patch('agent.graph.direct_chat_stream.get_llm_client', return_value=client),
         ]
         _enter_all(patches)
         try:
@@ -148,7 +145,7 @@ class TestDirectChatInjection:
     def test_empty_experiences_no_section(self):
         client = _FakeClient()
         patches = _no_side_injections() + [
-            patch("agent.graph.nodes.get_llm_client", return_value=client),
+            patch('agent.graph.direct_chat_stream.get_llm_client', return_value=client),
         ]
         _enter_all(patches)
         try:
@@ -184,7 +181,7 @@ class TestDirectChatStreamInjection:
 
 class TestChitchatBranchPlumbing:
     def test_state_experiences_passed_through(self):
-        from agent.graph.runner import _stream_chitchat_branch
+        from agent.graph.streaming_steps import _stream_chitchat_branch
 
         received = {}
 
@@ -193,8 +190,8 @@ class TestChitchatBranchPlumbing:
             yield {"type": "answer_delta", "content": "答"}
             yield {"type": "synth_answer_full", "content": "答"}
 
-        with patch("agent.graph.runner._direct_chat_stream", side_effect=_fake_stream), \
-             patch("agent.graph.runner._maybe_archive_round"):
+        with patch('agent.graph.streaming_steps._direct_chat_stream', side_effect=_fake_stream), \
+             patch('agent.graph.run_context._maybe_archive_round'):
             list(_stream_chitchat_branch(
                 "问一下", [], "skill", None,
                 recalled_context="RC", experiences=_EXP,

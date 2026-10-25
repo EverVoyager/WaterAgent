@@ -67,7 +67,7 @@ def run_curation_once() -> dict[str, int]:
 
     # ===== 1.5 会话任务段归档清理（超龄删除） =====
     try:
-        from agent.memory.session_archive import cleanup_archive
+        from agent.memory.archive_storage import cleanup_archive
         stats["archive_cleaned"] = cleanup_archive()
     except Exception as e:
         logger.debug("[curator] 归档清理失败：%s", e)
@@ -120,7 +120,8 @@ def run_curation_once() -> dict[str, int]:
 def _compact_semantic() -> int:
     """语义记忆 LLM 合并：低命中条目送压缩，高命中（>=10）受保护。"""
     from agent.memory import vector_index
-    from agent.memory.reflection import _llm_compact_semantic, check_memory_safety
+    from agent.memory.reflection_llm import _llm_compact_semantic
+    from agent.memory.safety import check_memory_safety
     from agent.memory.semantic_store import get_semantic_store
 
     store = get_semantic_store()
@@ -178,7 +179,7 @@ def _refine_procedures() -> int:
     """程序提炼：use_count>=3 且 refined_count<2 的程序，LLM 把步骤泛化为通用方法。"""
     from agent.memory import vector_index
     from agent.memory.procedure_store import get_procedure_store
-    from agent.memory.reflection import check_memory_safety
+    from agent.memory.safety import check_memory_safety
     from agent.prompts.reflection import COMPACT_SYSTEM_PROMPT as _COMPACT
     from agent.utils import parse_json_from_llm
     from app.core.llm import LLM_TIMEOUTS, get_llm_client, get_llm_config, strip_think

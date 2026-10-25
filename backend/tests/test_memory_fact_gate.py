@@ -4,7 +4,7 @@
 必须被拦截；正确的阈值断言、OR 多判据子句、历史叙事必须放行（宁漏勿错）。
 阈值断言与 WARNING_THRESHOLDS 单一同源：改阈值表本测试无需跟着改。
 """
-from agent.memory.reflection import _gate_violation, _is_factual_error
+from agent.memory.safety import _gate_violation, _is_factual_error
 
 
 class TestFactualErrorFlagged:

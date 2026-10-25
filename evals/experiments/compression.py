@@ -22,11 +22,10 @@ from evals.runner import run_case
 
 logger = logging.getLogger(__name__)
 
-# runner 模块顶层 import 了 compact_history 并在 _compact_history_entry 内
-# 调用——patch runner 命名空间的入口函数即"压缩关闭"
+# 同步和流式入口共用 run_context，替换其压缩入口即可保留全部历史。
 _COMPACT_OFF_TOGGLE = Toggle(
     kind="patch",
-    target="agent.graph.runner._compact_history_entry",
+    target='agent.graph.run_context._compact_history_entry',
     off_fn=lambda history, *args, **kwargs: history,
 )
 

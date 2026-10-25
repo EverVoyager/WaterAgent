@@ -7,8 +7,10 @@
 3. nodes._execute_one_tool 接线：校验失败 → error 置位、result 清空，
    坏数据不进 tool_results（fail-fast，交给 planner 重规划）。
 """
+
 import pytest
 
+import agent.graph.executor as _executor
 from agent.tools.mock_executor import clear_replay_context, execute_tool
 from agent.tools.schemas import validate_tool_result
 
@@ -96,10 +98,9 @@ class TestValidateToolResult:
 
 class TestExecutorExitGate:
     def _run_one(self, monkeypatch, tool_result):
-        import agent.graph.nodes as nodes_mod
 
-        monkeypatch.setattr(nodes_mod, "_cached_execute_tool", lambda name, args: tool_result)
-        return nodes_mod._execute_one_tool(
+        monkeypatch.setattr(_executor, "_cached_execute_tool", lambda name, args: tool_result)
+        return _executor._execute_one_tool(
             {"name": "get_weather", "arguments": {"location": "吴堡", "hours": 6}},
             idx=0, weather_rainfall_mm=0.0, weather_series=None,
             round_num=1, existing_keys=set(), duplicate_names=set(),

@@ -13,14 +13,9 @@
 import json
 from unittest.mock import MagicMock, patch
 
-from agent.graph.synthesizer_node import (
-    _SYNTH_META_SCHEMA,
-    _build_synth_messages,
-    _build_synth_system_content,
-    _stream_answer_via_llm,
-    _synth_metadata_via_llm,
-    _synth_via_llm_stream,
-)
+from agent.graph.synthesis.context import _build_synth_messages, _build_synth_system_content
+from agent.graph.synthesis.generation import _SYNTH_META_SCHEMA, _synth_metadata_via_llm
+from agent.graph.synthesis.streaming import _stream_answer_via_llm, _synth_via_llm_stream
 
 # ====== Mock 工厂 ======
 
@@ -137,9 +132,9 @@ class TestSynthMetadataViaLlm:
                 "citations": [],
             })
         )
-        with patch("agent.graph.synthesizer_node._call_synth_with_fallback", return_value=mock_resp), \
-             patch("agent.graph.synthesizer_node.get_llm_config", return_value={"model": "test"}), \
-             patch("agent.graph.synthesizer_node.get_llm_client") as mock_client:
+        with patch('agent.graph.synthesis.generation._call_synth_with_fallback', return_value=mock_resp), \
+             patch('app.core.llm.get_llm_config', return_value={"model": "test"}), \
+             patch('app.core.llm.get_llm_client') as mock_client:
             mock_client.return_value.with_options.return_value = MagicMock()
             metadata, citations = _synth_metadata_via_llm("查询", {})
             assert metadata["warning_level"] == "III"
@@ -152,9 +147,9 @@ class TestSynthMetadataViaLlm:
         mock_resp = _make_mock_chat_response(
             json.dumps({"warning_level": "", "reasoning": "", "actions": [], "citations": []})
         )
-        with patch("agent.graph.synthesizer_node._call_synth_with_fallback", return_value=mock_resp) as mock_call, \
-             patch("agent.graph.synthesizer_node.get_llm_config", return_value={"model": "test"}), \
-             patch("agent.graph.synthesizer_node.get_llm_client") as mock_client:
+        with patch('agent.graph.synthesis.generation._call_synth_with_fallback', return_value=mock_resp) as mock_call, \
+             patch('app.core.llm.get_llm_config', return_value={"model": "test"}), \
+             patch('app.core.llm.get_llm_client') as mock_client:
             mock_client.return_value.with_options.return_value = MagicMock()
             _synth_metadata_via_llm("查询", {})
             # 验证传入了 schema=_SYNTH_META_SCHEMA
@@ -171,8 +166,8 @@ class TestStreamAnswerViaLlm:
         """Phase 2 yield answer_delta 事件，content 来自 LLM stream。"""
         tokens = ["黄河", "吴堡站", "当前", "流量", "3000m³/s"]
         mock_stream = _make_mock_stream_chunks(tokens)
-        with patch("agent.graph.synthesizer_node.get_llm_config", return_value={"model": "test"}), \
-             patch("agent.graph.synthesizer_node.get_llm_client") as mock_client:
+        with patch('app.core.llm.get_llm_config', return_value={"model": "test"}), \
+             patch('app.core.llm.get_llm_client') as mock_client:
             mock_client.return_value.with_options.return_value.chat.completions.create.return_value = iter(mock_stream)
             events = list(_stream_answer_via_llm(
                 "查询", {}, {"warning_level": "III", "reasoning": "", "actions": []}
@@ -186,8 +181,8 @@ class TestStreamAnswerViaLlm:
         """Phase 2 最后 yield synth_answer_full 事件。"""
         tokens = ["回答", "内容"]
         mock_stream = _make_mock_stream_chunks(tokens)
-        with patch("agent.graph.synthesizer_node.get_llm_config", return_value={"model": "test"}), \
-             patch("agent.graph.synthesizer_node.get_llm_client") as mock_client:
+        with patch('app.core.llm.get_llm_config', return_value={"model": "test"}), \
+             patch('app.core.llm.get_llm_client') as mock_client:
             mock_client.return_value.with_options.return_value.chat.completions.create.return_value = iter(mock_stream)
             events = list(_stream_answer_via_llm(
                 "查询", {}, {"warning_level": "", "reasoning": "", "actions": []}
@@ -200,8 +195,8 @@ class TestStreamAnswerViaLlm:
         # 模拟 LLM 先输出 <think>推理</think> 再输出正文
         tokens = ["<think>", "内部推理", "</think>", "正文内容"]
         mock_stream = _make_mock_stream_chunks(tokens)
-        with patch("agent.graph.synthesizer_node.get_llm_config", return_value={"model": "test"}), \
-             patch("agent.graph.synthesizer_node.get_llm_client") as mock_client:
+        with patch('app.core.llm.get_llm_config', return_value={"model": "test"}), \
+             patch('app.core.llm.get_llm_client') as mock_client:
             mock_client.return_value.with_options.return_value.chat.completions.create.return_value = iter(mock_stream)
             events = list(_stream_answer_via_llm(
                 "查询", {}, {"warning_level": "", "reasoning": "", "actions": []}
@@ -217,8 +212,8 @@ class TestStreamAnswerViaLlm:
         """Phase 2 LLM 调用必须 stream=True。"""
         tokens = ["test"]
         mock_stream = _make_mock_stream_chunks(tokens)
-        with patch("agent.graph.synthesizer_node.get_llm_config", return_value={"model": "test"}), \
-             patch("agent.graph.synthesizer_node.get_llm_client") as mock_client:
+        with patch('app.core.llm.get_llm_config', return_value={"model": "test"}), \
+             patch('app.core.llm.get_llm_client') as mock_client:
             mock_create = mock_client.return_value.with_options.return_value.chat.completions.create
             mock_create.return_value = iter(mock_stream)
             list(_stream_answer_via_llm(
@@ -231,8 +226,8 @@ class TestStreamAnswerViaLlm:
         """Phase 1 的 metadata 应注入 Phase 2 的 user 消息。"""
         tokens = ["answer"]
         mock_stream = _make_mock_stream_chunks(tokens)
-        with patch("agent.graph.synthesizer_node.get_llm_config", return_value={"model": "test"}), \
-             patch("agent.graph.synthesizer_node.get_llm_client") as mock_client:
+        with patch('app.core.llm.get_llm_config', return_value={"model": "test"}), \
+             patch('app.core.llm.get_llm_client') as mock_client:
             mock_create = mock_client.return_value.with_options.return_value.chat.completions.create
             mock_create.return_value = iter(mock_stream)
             list(_stream_answer_via_llm(
@@ -250,8 +245,8 @@ class TestStreamAnswerViaLlm:
         """Phase 2 的 system prompt 应为 Phase 1 前缀 + 第二阶段纯文本指令。"""
         tokens = ["answer"]
         mock_stream = _make_mock_stream_chunks(tokens)
-        with patch("agent.graph.synthesizer_node.get_llm_config", return_value={"model": "test"}), \
-             patch("agent.graph.synthesizer_node.get_llm_client") as mock_client:
+        with patch('app.core.llm.get_llm_config', return_value={"model": "test"}), \
+             patch('app.core.llm.get_llm_client') as mock_client:
             mock_create = mock_client.return_value.with_options.return_value.chat.completions.create
             mock_create.return_value = iter(mock_stream)
             list(_stream_answer_via_llm(
@@ -276,9 +271,9 @@ class TestSynthViaLlmStreamIntegration:
         )
         tokens = ["回答"]
         mock_stream = _make_mock_stream_chunks(tokens)
-        with patch("agent.graph.synthesizer_node._call_synth_with_fallback", return_value=mock_meta_resp), \
-             patch("agent.graph.synthesizer_node.get_llm_config", return_value={"model": "test"}), \
-             patch("agent.graph.synthesizer_node.get_llm_client") as mock_client:
+        with patch('agent.graph.synthesis.generation._call_synth_with_fallback', return_value=mock_meta_resp), \
+             patch('app.core.llm.get_llm_config', return_value={"model": "test"}), \
+             patch('app.core.llm.get_llm_client') as mock_client:
             mock_client.return_value.with_options.return_value.chat.completions.create.return_value = iter(mock_stream)
             events = list(_synth_via_llm_stream("查询", {}))
             types = [e["type"] for e in events]
@@ -293,9 +288,9 @@ class TestSynthViaLlmStreamIntegration:
         )
         tokens = ["A", "B", "C"]
         mock_stream = _make_mock_stream_chunks(tokens)
-        with patch("agent.graph.synthesizer_node._call_synth_with_fallback", return_value=mock_meta_resp), \
-             patch("agent.graph.synthesizer_node.get_llm_config", return_value={"model": "test"}), \
-             patch("agent.graph.synthesizer_node.get_llm_client") as mock_client:
+        with patch('agent.graph.synthesis.generation._call_synth_with_fallback', return_value=mock_meta_resp), \
+             patch('app.core.llm.get_llm_config', return_value={"model": "test"}), \
+             patch('app.core.llm.get_llm_client') as mock_client:
             mock_client.return_value.with_options.return_value.chat.completions.create.return_value = iter(mock_stream)
             events = list(_synth_via_llm_stream("查询", {}))
             assert events[-1]["type"] == "synth_answer_full"
@@ -313,9 +308,9 @@ class TestSynthViaLlmStreamIntegration:
         )
         tokens = ["AAA", "BBB", "CCC"]
         mock_stream = _make_mock_stream_chunks(tokens)
-        with patch("agent.graph.synthesizer_node._call_synth_with_fallback", return_value=mock_meta_resp), \
-             patch("agent.graph.synthesizer_node.get_llm_config", return_value={"model": "test"}), \
-             patch("agent.graph.synthesizer_node.get_llm_client") as mock_client:
+        with patch('agent.graph.synthesis.generation._call_synth_with_fallback', return_value=mock_meta_resp), \
+             patch('app.core.llm.get_llm_config', return_value={"model": "test"}), \
+             patch('app.core.llm.get_llm_client') as mock_client:
             mock_client.return_value.with_options.return_value.chat.completions.create.return_value = iter(mock_stream)
             events = list(_synth_via_llm_stream("查询", {}))
             deltas = [e for e in events if e["type"] == "answer_delta"]

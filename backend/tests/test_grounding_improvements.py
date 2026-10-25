@@ -5,12 +5,9 @@
 2. _check_level_consistency / _apply_rule_level_override：规则引擎在线校验 LLM 等级
 3. 法规检索条款纳入 source_registry（source_type=regulation，可校验）
 """
+from agent.graph.synthesis.sources import _format_tool_results_for_llm
+from agent.graph.synthesis.validation import _apply_rule_level_override, _check_level_consistency
 from agent.graph.synthesizer import compute_warning_level
-from agent.graph.synthesizer_node import (
-    _apply_rule_level_override,
-    _check_level_consistency,
-    _format_tool_results_for_llm,
-)
 
 
 def _hydrology(flow=3200.0, level=638.5):
@@ -155,17 +152,17 @@ class TestCitationFilterNoRegen:
         import json
         from unittest.mock import patch
 
-        from agent.graph.synthesizer_node import _synth_via_llm
+        from agent.graph.synthesis.generation import _synth_via_llm
 
         # 1 条引用 quote 不在原文中 → 不应重生成（_call_synth_with_fallback 只调 1 次）
         meta = json.dumps({
             "warning_level": "II", "reasoning": "r", "actions": ["a"],
             "citations": [{"ref_id": 1, "quote": "编造的内容", "source_type": "web_search"}],
         })
-        with patch("agent.graph.synthesizer_node._call_synth_with_fallback",
+        with patch('agent.graph.synthesis.generation._call_synth_with_fallback',
                    return_value=_mock_resp(meta)) as mock_call, \
-             patch("agent.graph.synthesizer_node.get_llm_config", return_value={"model": "t"}), \
-             patch("agent.graph.synthesizer_node.get_llm_client"):
+             patch('app.core.llm.get_llm_config', return_value={"model": "t"}), \
+             patch('app.core.llm.get_llm_client'):
             result, citations = _synth_via_llm("查询", {"get_hydrology": _hydrology()})
             assert mock_call.call_count == 1
             assert citations == []  # 无效引用被过滤
@@ -175,15 +172,15 @@ class TestCitationFilterNoRegen:
         import json
         from unittest.mock import patch
 
-        from agent.graph.synthesizer_node import _synth_via_llm
+        from agent.graph.synthesis.generation import _synth_via_llm
 
         # 第 1 次等级错（III，规则判 II），第 2 次改正 → 应恰好调用 2 次
         bad = json.dumps({"warning_level": "III", "reasoning": "r", "actions": [], "citations": []})
         good = json.dumps({"warning_level": "II", "reasoning": "r", "actions": [], "citations": []})
-        with patch("agent.graph.synthesizer_node._call_synth_with_fallback",
+        with patch('agent.graph.synthesis.generation._call_synth_with_fallback',
                    side_effect=[_mock_resp(bad), _mock_resp(good)]) as mock_call, \
-             patch("agent.graph.synthesizer_node.get_llm_config", return_value={"model": "t"}), \
-             patch("agent.graph.synthesizer_node.get_llm_client"):
+             patch('app.core.llm.get_llm_config', return_value={"model": "t"}), \
+             patch('app.core.llm.get_llm_client'):
             result, _ = _synth_via_llm("查询", {"get_hydrology": _hydrology()})
             assert mock_call.call_count == 2
             assert result["warning_level"] == "II"
@@ -196,7 +193,7 @@ class TestPhase1ProgressEvents:
         import json
         from unittest.mock import MagicMock, patch
 
-        from agent.graph.synthesizer_node import _synth_via_llm_stream
+        from agent.graph.synthesis.streaming import _synth_via_llm_stream
 
         meta = json.dumps({"warning_level": "", "reasoning": "", "actions": [], "citations": []})
         chunks = []
@@ -209,10 +206,10 @@ class TestPhase1ProgressEvents:
         end.choices = []
         chunks.append(end)
 
-        with patch("agent.graph.synthesizer_node._call_synth_with_fallback",
+        with patch('agent.graph.synthesis.generation._call_synth_with_fallback',
                    return_value=_mock_resp(meta)), \
-             patch("agent.graph.synthesizer_node.get_llm_config", return_value={"model": "t"}), \
-             patch("agent.graph.synthesizer_node.get_llm_client") as mock_client:
+             patch('app.core.llm.get_llm_config', return_value={"model": "t"}), \
+             patch('app.core.llm.get_llm_client') as mock_client:
             mock_client.return_value.with_options.return_value.chat.completions.create.return_value = iter(chunks)
             events = list(_synth_via_llm_stream("查询", {}))
 
@@ -232,13 +229,13 @@ class TestFormatErrorResilience:
     def test_all_attempts_bad_json_degrades_to_rule_engine(self):
         from unittest.mock import patch
 
-        from agent.graph.synthesizer_node import _synth_metadata_via_llm
+        from agent.graph.synthesis.generation import _synth_metadata_via_llm
 
         # 三次都返回非法 JSON（模拟截断）→ 不抛异常，降级为规则引擎 metadata
-        with patch("agent.graph.synthesizer_node._call_synth_with_fallback",
+        with patch('agent.graph.synthesis.generation._call_synth_with_fallback',
                    return_value=_mock_resp("这不是JSON，被截断了 \"{")) as mock_call, \
-             patch("agent.graph.synthesizer_node.get_llm_config", return_value={"model": "t"}), \
-             patch("agent.graph.synthesizer_node.get_llm_client"):
+             patch('app.core.llm.get_llm_config', return_value={"model": "t"}), \
+             patch('app.core.llm.get_llm_client'):
             meta, citations = _synth_metadata_via_llm("查询", {"get_hydrology": _hydrology()})
             assert mock_call.call_count == 3  # 1 次初始 + 2 次重试
             assert meta["warning_level"] == "II"  # 规则引擎按流量 3200 判 II
@@ -250,13 +247,13 @@ class TestFormatErrorResilience:
         import json
         from unittest.mock import patch
 
-        from agent.graph.synthesizer_node import _synth_metadata_via_llm
+        from agent.graph.synthesis.generation import _synth_metadata_via_llm
 
         good = json.dumps({"warning_level": "II", "reasoning": "r", "actions": [], "citations": []})
-        with patch("agent.graph.synthesizer_node._call_synth_with_fallback",
+        with patch('agent.graph.synthesis.generation._call_synth_with_fallback',
                    side_effect=[_mock_resp("截断的{"), _mock_resp(good)]) as mock_call, \
-             patch("agent.graph.synthesizer_node.get_llm_config", return_value={"model": "t"}), \
-             patch("agent.graph.synthesizer_node.get_llm_client"):
+             patch('app.core.llm.get_llm_config', return_value={"model": "t"}), \
+             patch('app.core.llm.get_llm_client'):
             meta, _ = _synth_metadata_via_llm("查询", {"get_hydrology": _hydrology()})
             assert mock_call.call_count == 2
             assert meta["warning_level"] == "II"

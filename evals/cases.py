@@ -426,8 +426,9 @@ def _make_long_history(rng: random.Random, station: str, warning_level_value: st
     from app.core.config import get_settings
 
     budget = get_settings().HISTORY_MAX_TOKENS
+    total_tokens = sum(estimate_tokens(m.get("content", "")) for m in history)
     i = 0
-    while sum(estimate_tokens(m.get("content", "")) for m in history) <= budget * 1.08:
+    while total_tokens <= budget * 1.08:
         topic_q, topic_a = _FILLER_TOPICS[i % len(_FILLER_TOPICS)]
         hour = (8 + i) % 24
         bulletin = (
@@ -444,6 +445,7 @@ def _make_long_history(rng: random.Random, station: str, warning_level_value: st
             q1=q_low + i * 10,
             q2=q_high + i * 15,
         ) + bulletin})
+        total_tokens += sum(estimate_tokens(m["content"]) for m in history[-2:])
         i += 1
     return history
 

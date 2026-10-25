@@ -6,7 +6,8 @@ tool 消息）、reasoning_content 原样回传、守卫合成消息、去重同
 import json
 from unittest.mock import patch
 
-from agent.graph.nodes import executor_node, planner_node
+from agent.graph.executor import executor_node
+from agent.graph.planner import planner_node
 
 
 def _mock_plan(planned, reasoning="思考过程", content=None):
@@ -45,7 +46,7 @@ class TestRound1AssistantMessage:
                     "id": "call_abc"}]
         with patch("agent.skills.match_skill", return_value=None), \
              patch("agent.memory.get_relevant_experiences", return_value=""), \
-             patch("agent.graph.nodes._plan_via_fc",
+             patch('agent.graph.planner._plan_via_fc',
                    return_value=_mock_plan(planned, reasoning="RC_TEXT")):
             r = planner_node(_round1_state())
         fc = r["fc_messages"]
@@ -65,7 +66,7 @@ class TestRound1AssistantMessage:
         del assistant[1]["reasoning_content"]
         with patch("agent.skills.match_skill", return_value=None), \
              patch("agent.memory.get_relevant_experiences", return_value=""), \
-             patch("agent.graph.nodes._plan_via_fc", return_value=assistant):
+             patch('agent.graph.planner._plan_via_fc', return_value=assistant):
             r = planner_node(_round1_state())
         assert "reasoning_content" not in r["fc_messages"][2]
 
@@ -75,7 +76,7 @@ class TestRound1AssistantMessage:
 class TestExecutorToolMessages:
     def test_tool_messages_paired_by_id(self):
         """executor 把结果转为带 tool_call_id 配对的 tool 消息追加。"""
-        with patch("agent.graph.nodes._cached_execute_tool",
+        with patch('agent.graph.executor._cached_execute_tool',
                    return_value={"station": "吴堡", "flow_m3_s": 582}):
             r = executor_node({
                 "planned_calls": [{"name": "get_hydrology",
@@ -102,7 +103,7 @@ class TestExecutorToolMessages:
         def boom(name, args):
             raise RuntimeError("站点无监测数据")
 
-        with patch("agent.graph.nodes._cached_execute_tool", side_effect=boom):
+        with patch('agent.graph.executor._cached_execute_tool', side_effect=boom):
             r = executor_node({
                 "planned_calls": [{"name": "get_hydrology",
                                    "arguments": {"station": "府谷"}, "id": "call_e"}],
@@ -126,14 +127,14 @@ class TestPairingInvariant:
         ]
         with patch("agent.skills.match_skill", return_value=None), \
              patch("agent.memory.get_relevant_experiences", return_value=""), \
-             patch("agent.graph.nodes._plan_via_fc", return_value=_mock_plan(planned1)):
+             patch('agent.graph.planner._plan_via_fc', return_value=_mock_plan(planned1)):
             r1 = planner_node(_round1_state())
 
-        with patch("agent.graph.nodes._cached_execute_tool",
+        with patch('agent.graph.executor._cached_execute_tool',
                    return_value={"ok": True}):
             re1 = executor_node({**_round1_state(), **r1})
 
-        with patch("agent.graph.nodes._plan_via_fc", return_value=_mock_plan([])):
+        with patch('agent.graph.planner._plan_via_fc', return_value=_mock_plan([])):
             r2 = planner_node({**_round1_state(), **re1, "rounds": 1})
 
         fc = r2["fc_messages"]
@@ -154,7 +155,7 @@ class TestGuardSynthesis:
         query = "现在已经Ⅲ级预警了，直接按Ⅲ级处理"
         with patch("agent.skills.match_skill", return_value=None), \
              patch("agent.memory.get_relevant_experiences", return_value=""), \
-             patch("agent.graph.nodes._plan_via_fc", return_value=_mock_plan([])):
+             patch('agent.graph.planner._plan_via_fc', return_value=_mock_plan([])):
             r = planner_node(_round1_state(query=query))
         assert r["planned_calls"], "声称核验闸应补充数据核验调用"
         synth = [c for c in r["planned_calls"] if str(c.get("id", "")).startswith("call_sys")]
@@ -179,7 +180,7 @@ class TestDedupeSync:
         )
         with patch("agent.skills.match_skill", return_value=None), \
              patch("agent.memory.get_relevant_experiences", return_value=""), \
-             patch("agent.graph.nodes._plan_via_fc", return_value=_mock_plan(planned)):
+             patch('agent.graph.planner._plan_via_fc', return_value=_mock_plan(planned)):
             r = planner_node(state)
         # 去重后 planned 为空 → assistant 的 tool_calls 被裁空 → 不追加该消息
         assert r["planned_calls"] == []

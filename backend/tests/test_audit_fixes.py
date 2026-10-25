@@ -1,4 +1,5 @@
 """项目审查问题的离线回归，不访问业务数据库或外部数据源。"""
+
 import inspect
 from datetime import datetime, timezone
 from itertools import permutations
@@ -8,8 +9,8 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
+import agent.graph.executor as _executor
 from agent.data import weather
-from agent.graph import nodes
 from agent.graph.synthesizer import compute_warning_level
 from agent.skills import importer
 from agent.tools.mock_executor import execute_tool
@@ -67,8 +68,8 @@ def test_new_weather_replaces_previous_rain_before_runoff(monkeypatch, new_rain,
                     "total_rainfall_mm": new_rain, "series": series}
         return predict_runoff_real(PredictRunoffParams(**args))
 
-    monkeypatch.setattr(nodes, "_cached_execute_tool", execute)
-    result = nodes.executor_node({
+    monkeypatch.setattr(_executor, "_cached_execute_tool", execute)
+    result = _executor.executor_node({
         "planned_calls": [
             {"name": "get_weather", "arguments": {"location": "吴堡"}},
             {"name": "predict_runoff", "arguments": {"station": "吴堡", "rainfall_mm": None}},
@@ -85,8 +86,8 @@ def test_new_weather_replaces_previous_rain_before_runoff(monkeypatch, new_rain,
 
 
 def test_missing_weather_stays_unknown_and_latest_zero_is_preserved():
-    assert nodes._collect_weather_context({}) == (None, None)
-    assert nodes._collect_weather_context({
+    assert _executor._collect_weather_context({}) == (None, None)
+    assert _executor._collect_weather_context({
         "get_weather": {"total_rainfall_mm": 20},
         "get_weather_1": {"total_rainfall_mm": 0},
     }) == (0, None)

@@ -24,7 +24,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from agent.memory import longterm
+from agent.memory import longterm, longterm_files
 from agent.memory.episode_store import get_episode_store
 from agent.memory.memory_store import get_memory_store, is_memory_enabled
 from agent.memory.procedure_store import get_procedure_store
@@ -175,8 +175,8 @@ async def update_longterm(req: LongtermUpdateRequest):
     """人工编辑 MEMORY.md（Agent 权威手册，Agent 自身只读）。"""
     path = longterm._manual_file()
     path.parent.mkdir(parents=True, exist_ok=True)
-    longterm._atomic_write(path, req.content.rstrip() + "\n")
-    return LongtermResponse(content=longterm._read(path))
+    longterm_files._atomic_write(path, req.content.rstrip() + "\n")
+    return LongtermResponse(content=longterm_files._read(path))
 
 
 # ====== Agent 自动记忆（memory/ 目录） ======
@@ -227,7 +227,7 @@ async def create_semantic(req: SemanticCreateRequest):
         raise HTTPException(status_code=503, detail="MySQL 未配置，语义记忆不可用")
     # 手动写入与自动反思路径过同样的安全闸（注入载荷/敏感信息/领域事实），
     # 否则手动录入的错误阈值断言会被检索注入系统性放大
-    from agent.memory.reflection import check_memory_safety
+    from agent.memory.safety import check_memory_safety
     violation = check_memory_safety(f"{req.title}。{req.content}")
     if violation:
         raise HTTPException(status_code=422, detail=f"内容未通过安全校验（{violation[:80]}）")

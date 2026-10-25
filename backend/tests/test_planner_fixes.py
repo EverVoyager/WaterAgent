@@ -11,7 +11,8 @@
 import json
 from unittest.mock import patch
 
-from agent.graph.nodes import _build_planner_system_prompt, planner_node
+from agent.graph.planner import planner_node
+from agent.graph.planner_context import _build_planner_system_prompt
 
 
 def _mock_plan(planned, reasoning="思考过程"):
@@ -64,7 +65,7 @@ class TestGuardMergeIntoAssistant:
              "id": "call_a"},
         ]
         with _NO_SIDE[0], _NO_SIDE[1], \
-                patch("agent.graph.nodes._plan_via_fc",
+                patch('agent.graph.planner._plan_via_fc',
                       return_value=_mock_plan(model_planned)):
             r = planner_node(_round1_state(query))
 
@@ -92,7 +93,7 @@ class TestGuardMergeIntoAssistant:
              "id": "call_x"},
         ]
         with _NO_SIDE[0], _NO_SIDE[1], \
-                patch("agent.graph.nodes._plan_via_fc",
+                patch('agent.graph.planner._plan_via_fc',
                       return_value=_mock_plan(model_planned)):
             r = planner_node(_round1_state(query))
         roles = [m["role"] for m in r["fc_messages"]]
@@ -104,7 +105,7 @@ class TestGuardMergeIntoAssistant:
         """模型空计划 + 守卫补充：单条合成 assistant（原行为保持不变）。"""
         query = "村里都说吴堡站已经Ⅰ级预警了，直接按Ⅰ级处理"
         with _NO_SIDE[0], _NO_SIDE[1], \
-                patch("agent.graph.nodes._plan_via_fc",
+                patch('agent.graph.planner._plan_via_fc',
                       return_value=_mock_plan([])):
             r = planner_node(_round1_state(query))
         assert r["planned_calls"]
@@ -130,7 +131,7 @@ class TestGuardMergeIntoAssistant:
                          "arguments": {"station": "吴堡", "metric": "both"}}],
         )
         with _NO_SIDE[0], _NO_SIDE[1], \
-                patch("agent.graph.nodes._plan_via_fc",
+                patch('agent.graph.planner._plan_via_fc',
                       return_value=_mock_plan(model_planned)):
             r = planner_node(state)
         tc_msgs = [m for m in r["fc_messages"]
@@ -146,7 +147,7 @@ class TestGuardMergeIntoAssistant:
         每条 assistant.tool_call id 必须有配对 tool 消息（失败工具也要配对，
         2026-09-14 评估中 4 例即死于此约束被打破）。
         """
-        from agent.graph.nodes import executor_node
+        from agent.graph.executor import executor_node
 
         query = "府谷站已达到Ⅱ级预警标准，请生成应急处置预案"
         model_planned = [
@@ -155,7 +156,7 @@ class TestGuardMergeIntoAssistant:
              "id": "call_a"},
         ]
         with _NO_SIDE[0], _NO_SIDE[1], \
-                patch("agent.graph.nodes._plan_via_fc",
+                patch('agent.graph.planner._plan_via_fc',
                       return_value=_mock_plan(model_planned)):
             r1 = planner_node(_round1_state(query))
 
@@ -164,12 +165,12 @@ class TestGuardMergeIntoAssistant:
                 raise ValueError("Invalid arguments for generate_plan")
             return {"ok": True}
 
-        with patch("agent.graph.nodes._cached_execute_tool",
+        with patch('agent.graph.executor._cached_execute_tool',
                    side_effect=_flaky_execute):
             re1 = executor_node({**_round1_state(query), **r1})
 
         with _NO_SIDE[0], _NO_SIDE[1], \
-                patch("agent.graph.nodes._plan_via_fc",
+                patch('agent.graph.planner._plan_via_fc',
                       return_value=_mock_plan([])):
             r2 = planner_node({**_round1_state(query), **re1, "rounds": 1})
 

@@ -3,13 +3,15 @@
 降级链第一档为 forced tool_choice 的工具通道（对齐 Pydantic AI Tool Output /
 LangChain function_calling 方法），400 时降级 json_object（进程内记忆）。
 """
+
 import json
 from unittest.mock import MagicMock
 
 from openai import APIError
 
-from agent.graph.synthesizer_node import (
-    _SYNTH_META_SCHEMA,
+import agent.graph.synthesis.transport as _transport
+from agent.graph.synthesis.generation import _SYNTH_META_SCHEMA
+from agent.graph.synthesis.transport import (
     _append_structured_retry_feedback,
     _call_synth_with_fallback,
     _extract_structured_content,
@@ -89,7 +91,6 @@ class TestToolCallingTier:
 
     def test_thinking_mode_adapts_to_auto_with_instruction(self):
         """思考模式 400（不支持 forced tool_choice）→ 自动降 auto 并附提交指令。"""
-        import agent.graph.synthesizer_node as sn
 
         ok = MagicMock()
         client = MagicMock()
@@ -97,7 +98,7 @@ class TestToolCallingTier:
             _make_400("Thinking mode does not support this tool_choice"),
             ok,  # auto 重试成功
         ]
-        resp = sn._call_tool_channel(client, "m", [{"role": "user", "content": "x"}], {})
+        resp = _transport._call_tool_channel(client, "m", [{"role": "user", "content": "x"}], {})
         assert resp is ok
         assert client.chat.completions.create.call_count == 2
         kw = client.chat.completions.create.call_args.kwargs
@@ -106,7 +107,7 @@ class TestToolCallingTier:
         assert kw["messages"][-1]["role"] == "user"
         assert "提交本次结构化结果" in kw["messages"][-1]["content"]
         assert len(kw["messages"]) == 2
-        assert sn._TOOL_CHOICE_MODE == "auto"
+        assert _transport._TOOL_CHOICE_MODE == "auto"
 
     def test_400_downgrades_and_remembered(self):
         """tool 通道 400（tools 不支持）→ json_object 成功；再次调用直接从 json_object 开始。"""

@@ -43,11 +43,10 @@ def _passes_read_gate(*texts: str) -> bool:
     闸自身故障时放行（降级为信任写入侧校验，不阻塞主流程）。
     """
     try:
-        from agent.memory.reflection import check_memory_safety
+        from agent.memory.safety import check_memory_safety
         return check_memory_safety(*texts) is None
     except Exception:
         return True
-
 
 # ============ 注入追踪（效果闭环）============
 

@@ -20,12 +20,14 @@ KV_CACHE_WARMUP=0 可关闭预热（冷口径，默认开）。
 对外声明形如："多轮会话 planner 节点前缀命中率 X% → Y%（破坏 → 冻结），
 等效 token 开销 −Z%"。
 """
+
 import logging
 import os
 import random
 import time
 from unittest.mock import patch
 
+import agent.graph.planner_context as _planner_context
 from evals.cases import EvalCase
 from evals.experiments.prompt_capture import capture_prompts
 from evals.replay import case_env
@@ -34,7 +36,7 @@ from train.data_gen.scenario import _make_overrides
 
 logger = logging.getLogger(__name__)
 
-_PLANNER_PROMPT_TARGET = "agent.graph.nodes._build_planner_system_prompt"
+_PLANNER_PROMPT_TARGET = 'agent.graph.planner_context._build_planner_system_prompt'
 
 _SESSION_QUERY_TPL = [
     "查一下{station}水文站现在的实时水情。",
@@ -107,7 +109,6 @@ def run_kv_cache_experiment(station: str = "吴堡", model_label: str = "") -> d
     ``evals.experiments.prefix_reuse_ratio`` 离线计算静态前缀复用占比
     （预热不落盘——落盘只含计量轮）。
     """
-    import agent.graph.nodes as nodes_mod
     from app.core.llm_stats import reset_cache_stats
 
     dump_dir = os.environ.get("KV_PROMPT_DUMP", "").strip() or None
@@ -129,10 +130,10 @@ def run_kv_cache_experiment(station: str = "吴堡", model_label: str = "") -> d
 
     # ===== 破坏臂：planner 系统提示尾部追加逐调用变化的 nonce =====
     reset_cache_stats()
-    original_prompt = nodes_mod._build_planner_system_prompt
+    original_prompt = _planner_context._build_planner_system_prompt
 
-    def _broken_prompt() -> str:
-        return original_prompt() + f"\n<!-- eval-nonce:{time.time_ns()} -->"
+    def _broken_prompt(query: str = "") -> str:
+        return original_prompt(query) + f"\n<!-- eval-nonce:{time.time_ns()} -->"
 
     with patch(_PLANNER_PROMPT_TARGET, new=_broken_prompt):
         if warm:

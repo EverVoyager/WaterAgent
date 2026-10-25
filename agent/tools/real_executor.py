@@ -334,12 +334,11 @@ def read_session_archive_real(params: ReadSessionArchiveParams) -> dict[str, Any
     （过期清理/归档未跑）抛 FileNotFoundError，由 executor 记为工具错误
     回传 planner——模型可基于摘要继续作答，不中断主流程。
     """
-    from agent.memory.session_archive import read_archive_file
+    from agent.memory.archive_storage import read_archive_file
 
     result = read_archive_file(params.file)
     result["source"] = "session_archive"
     return result
-
 
 # 真实实现的工具映射表
 _REAL_IMPLEMENTATIONS = {

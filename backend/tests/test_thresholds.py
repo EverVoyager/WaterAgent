@@ -149,7 +149,7 @@ class TestPromptRendering:
 
     def test_synth_system_content_uses_runtime_render(self, tmp_path):
         """synthesizer 节点走运行时渲染（换档案后 system 变化）。"""
-        from agent.graph.synthesizer_node import _build_synth_system_content
+        from agent.graph.synthesis.context import _build_synth_system_content
 
         try:
             new_cfg = _tmp_config(
@@ -170,7 +170,8 @@ class TestPromptRendering:
 
 class TestDerivedConsumers:
     def test_mock_hydrology_uses_station_profile(self):
-        from agent.tools.mock_executor import GetHydrologyParams, _mock_get_hydrology
+        from agent.tools.mock_results import _mock_get_hydrology
+        from agent.tools.schemas import GetHydrologyParams
 
         result = _mock_get_hydrology(GetHydrologyParams(station="吴堡", metric="both"))
         assert result["warning_level_m"] == 642.5

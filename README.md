@@ -361,7 +361,7 @@ START → **planner**（Function Calling 规划 + 信息充分性判断）
   - Skill 系统（`agent/skills/`，借鉴 Claude Skills）：description embedding 匹配 → 按需加载指令 → 工具子集隔离；支持 SKILL.md / .zip 导入
   - 五类记忆（`agent/memory/`）：会话（上下文压缩）、长期（MEMORY.md 手册 + memory/ 目录）、语义 / 情景 / 程序（MySQL + Qdrant 向量检索，程序可晋升 Skill）；Curator 周期治理（剪枝 → 压缩 → 提炼 → 晋升 → 对账）
   - 上下文压缩（`context_compact.py`，借鉴 Codex compact）：history 超 4000 token → 保留近 2 轮原文 + 早轮 LLM 摘要
-  - 结构化输出降级 + Citation Grounding（`synthesizer_node`）：json_schema strict → json_object → 无 response_format + 4 级 JSON 修复；引用须为来源原文子串，否则带反馈重生成
+  - 结构化输出与 Citation Grounding（`graph/synthesis/`）：工具通道 → json_object → 无 response_format + JSON 修复；无效引用逐条过滤，等级不一致时带反馈重生成
 - **下游服务**：本地 LlamaFactory / vLLM（微调水利大模型，或云端 qwen-plus）｜ Qdrant 向量库（法规 RAG 检索 + Skill 匹配）｜ 外部数据源（高德 / Tavily / qqjjsj.com）
 - **训练管线**（`train/`）：Self-Instruct 种子扩张 → 场景参数化 → 双模型蒸馏 → 三道过滤 → LLM-as-Judge → SFT + DPO 偏好对 → QLoRA / GRPO，微调产物供本地部署使用
 
@@ -385,6 +385,9 @@ docker compose --profile init run --rm vector-init   # 首次：构建法规向�
 WaterAgents/
 ├── agent/                          # Agent 核心
 │   ├── graph/                      # LangGraph 工作流（节点/流式/压缩/缓存/异常分类）
+│   │   ├── planner.py / executor.py # 工具规划与执行，各自只依赖所需上下文/工具层
+│   │   ├── synthesis/              # 研判：context/sources/transport/validation/generation/streaming
+│   │   └── runner.py               # 运行入口，复用 run_context 与 streaming_steps
 │   ├── tools/                      # 8 个工具 + schemas（真实/mock 双轨执行器）
 │   ├── skills/                     # Skill 系统（匹配/存储/导入/解析）
 │   ├── rag/                        # 法规 RAG（Qdrant + DashScope embedding）
@@ -392,6 +395,10 @@ WaterAgents/
 │   ├── data/                       # 实时数据源（水文爬虫/高德天气/Tavily）
 │   ├── gis/                        # GIS 地形分析（SRTM DEM + rasterio）
 │   ├── memory/                     # 五类记忆（longterm/semantic/episode/procedure）+ Curator
+│   │   ├── reflection.py           # 反思调度，调用 reflection_llm / reflection_writer
+│   │   ├── safety.py               # 独立安全闸，供反思、治理和注入共用
+│   │   ├── longterm_files.py       # 主题文件与索引；longterm.py 负责上下文注入
+│   │   └── session_archive.py      # 压缩归档编排；分段/存储/召回各有独立模块
 │   └── prompts/                    # 系统提示词（分模块）
 ├── train/                          # 微调管线（data_gen/lora/grpo/rewards/eval/tests）
 ├── evals/                          # 系统级评估（用例/回放/指标/Judge/消融/回归门禁）
@@ -403,10 +410,15 @@ WaterAgents/
 │   ├── scripts/                    # seed_skills 等运维脚本
 │   └── tests/                      # 单元测试（MySQL 用例自动 skipif）
 ├── frontend/                       # Vue 3 + TS（AgentView/SkillsView/HealthView）
+│   └── src/                        # SkillsView 组合 useSkills 状态逻辑与 SkillEditor 表单
 ├── docker/                         # compose + Dockerfile
 ├── pyproject.toml                  # pytest + ruff 配置
 └── .github/workflows/ci.yml        # CI（ruff + pytest + 前端 tsc/lint/test）
 ```
+
+模块按职责拆分，保留 `agent.graph.workflow`、`agent.graph.nodes` 和记忆模块的公共入口。
+底层存储与安全校验不依赖图运行入口；同步与流式对话共用消息构造和可见输出过滤。
+新增逻辑放入已有职责模块，避免在入口文件继续堆积工具实现、提示构造或持久化操作。
 
 ## 测试与质量
 

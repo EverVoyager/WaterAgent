@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from agent.graph.nodes import _build_planner_system_prompt
+from agent.graph.planner_context import _build_planner_system_prompt
 from agent.prompts import DIRECT_CHAT_PROMPT
 
 

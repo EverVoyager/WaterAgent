@@ -4,10 +4,7 @@
 - _verify_citations：引用原文真实性校验（精确子串 + 空白宽松匹配）
 - _build_citations_with_metadata：引用与来源元数据拼合 + 无效引用过滤
 """
-from agent.graph.synthesizer_node import (
-    _build_citations_with_metadata,
-    _verify_citations,
-)
+from agent.graph.synthesis.validation import _build_citations_with_metadata, _verify_citations
 
 # ============ _verify_citations ============
 

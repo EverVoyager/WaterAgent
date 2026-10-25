@@ -7,7 +7,7 @@
 - request_id_var：跨线程传递的 ContextVar。contextvars 不随手动创建的
   线程自动继承，两类线程需显式处理：
     1. SSE agent worker（app.api.agent._stream_generator）：读该值后 bind
-    2. executor 工具线程池（agent.graph.nodes._run_stage）：copy_context 传播
+    2. executor 工具线程池（agent.graph.executor._run_stage）：copy_context 传播
 """
 import contextvars
 import time

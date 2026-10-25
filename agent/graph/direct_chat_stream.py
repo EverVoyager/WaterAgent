@@ -1,8 +1,4 @@
-"""闲聊节点流式生成器。
-
-从 nodes.py 拆分而来，独立维护 LLM stream=True 的 token 级流式输出逻辑，
-包括 Qwen3 思考内容剥离（与 llm_helpers._stream_llm 保持一致的状态机）。
-"""
+"""闲聊节点：同步回答与流式回答。"""
 import logging
 from typing import Any
 
@@ -14,32 +10,26 @@ from openai import (
 )
 
 from agent.graph.errors import _classify_llm_error
+from agent.graph.state import AgentState
+from agent.graph.stream_output import stream_answer_events
 from agent.prompts import DIRECT_CHAT_PROMPT
-from agent.utils import CitationMarkerFilter
-from app.core.llm import LLM_TIMEOUTS, get_llm_client, get_llm_config
+from agent.utils import strip_citation_markers
+from app.core.llm import LLM_TIMEOUTS, extract_content, get_llm_client, get_llm_config
 from app.core.llm_stats import record_llm_usage
 
 logger = logging.getLogger(__name__)
 
 
-def _direct_chat_stream(
+# ====== 节点函数 ======
+
+def _build_chat_messages(
     query: str,
     history: list[dict[str, Any]],
     skill_instructions: str = "",
     recalled_context: str = "",
     experiences: str = "",
-):
-    """流式版本的闲聊生成器。使用 LLM stream=True，逐 token yield answer_delta。
-
-    借鉴 LangChain astream_events 的 on_chat_model_stream 事件思路。
-    LLM 调用失败时抛 LLMError。
-
-    experiences：planner round-1 检索的历史经验（方案 A 作答端注入，
-    与 direct_chat_node 同款——user 消息尾部动态区，system 前缀不动）。
-    """
-    settings = get_llm_config()
-    client = get_llm_client().with_options(timeout=LLM_TIMEOUTS["chat"])
-
+) -> list[dict[str, str]]:
+    """同步与流式对话共用上下文，动态经验只追加到 user 消息末尾。"""
     # 注入已启用 Skill 元信息（name + description）作为上下文
     # 借鉴 Claude 原生 Skills：元数据始终可见，LLM 自然能回答"你有哪些技能"
     # 不使用"当用户询问X时..."硬编码规则（已废弃，改用 list_skills 工具 + 元信息上下文）
@@ -96,6 +86,68 @@ def _direct_chat_stream(
         user_content += "\n\n" + recalled_context
     messages.append({"role": "user", "content": user_content})
 
+    return messages
+
+
+def direct_chat_node(state: AgentState) -> dict[str, Any]:
+    """闲聊节点：直接调用 LLM 对话，跳过工具与研判。LLM 不可用时直接抛 LLMError。"""
+    settings = get_llm_config()
+    client = get_llm_client().with_options(timeout=LLM_TIMEOUTS["chat"])
+    messages = _build_chat_messages(
+        state["user_query"], state.get("history", []),
+        state.get("skill_instructions", ""), state.get("recalled_context", ""),
+        state.get("experiences", ""),
+    )
+
+    try:
+        resp = client.chat.completions.create(
+            model=settings["model"],
+            messages=messages,
+            temperature=0.7,
+            max_tokens=4096,
+        )
+        record_llm_usage("chat", resp.usage)
+    except (APITimeoutError, RateLimitError, APIConnectionError, APIError) as e:
+        logger.exception("[direct_chat] LLM 调用失败 (%s)", type(e).__name__)
+        raise _classify_llm_error(e) from e
+    except Exception as e:
+        logger.exception("[direct_chat] LLM 未知异常")
+        raise _classify_llm_error(e) from e
+
+    # 闲聊路径无联网搜索，剥离模型可能编造的 [N] 引用标记
+    answer = strip_citation_markers(extract_content(resp.choices[0].message))
+    logger.info("[direct_chat] answer=%s", answer[:80])
+    return {
+        "final_answer": answer,
+        "warning_level": "",     # 闲聊不输出预警等级
+        "reasoning": "",
+        "actions": [],
+        "tool_calls": [],
+    }
+
+
+def _direct_chat_stream(
+    query: str,
+    history: list[dict[str, Any]],
+    skill_instructions: str = "",
+    recalled_context: str = "",
+    experiences: str = "",
+):
+    """流式版本的闲聊生成器。使用 LLM stream=True，逐 token yield answer_delta。
+
+    借鉴 LangChain astream_events 的 on_chat_model_stream 事件思路。
+    LLM 调用失败时抛 LLMError。
+
+    experiences：planner round-1 检索的历史经验（方案 A 作答端注入，
+    与 direct_chat_node 同款——user 消息尾部动态区，system 前缀不动）。
+    """
+    settings = get_llm_config()
+    client = get_llm_client().with_options(timeout=LLM_TIMEOUTS["chat"])
+
+    messages = _build_chat_messages(
+        query, history, skill_instructions, recalled_context, experiences,
+    )
+
     try:
         stream = client.chat.completions.create(
             model=settings["model"],
@@ -113,67 +165,4 @@ def _direct_chat_stream(
         logger.exception("[direct_chat_stream] LLM 未知异常")
         raise _classify_llm_error(e) from e
 
-    # Qwen3 思考内容剥离：流式需缓冲检测 <think>...</think> 块
-    # 与 llm_helpers._stream_llm 保持一致的状态机逻辑
-    # 仅取 delta.content，忽略 delta.reasoning_content（推理过程不流式推给前端）
-    # 引用标记过滤：闲聊路径无联网搜索，answer 中的 [N] 一律剥离（防模型凭空编"参考文献"）
-    cite_filter = CitationMarkerFilter(valid_ref_ids=None)
-    filtered_answer: list[str] = []
-    buffer = ""
-    in_think = False
-    for chunk in stream:
-        # include_usage 时末 chunk 的 choices 为空、usage 携带统计信息
-        usage = getattr(chunk, "usage", None)
-        if usage:
-            record_llm_usage("chat_stream", usage)
-        if not chunk.choices:
-            continue
-        delta = chunk.choices[0].delta
-        content = getattr(delta, "content", None)
-        if not content:
-            continue
-        buffer += content
-        output = ""
-        while buffer:
-            if in_think:
-                end = buffer.find("</think>")
-                if end == -1:
-                    # think 块未结束，继续缓冲
-                    break
-                # 跳过 think 内容及结束标签
-                buffer = buffer[end + len("</think>"):]
-                while buffer and buffer[0] in " \n\t":
-                    buffer = buffer[1:]
-                in_think = False
-            else:
-                start = buffer.find("<think>")
-                if start == -1:
-                    # 没有 think 标签，但保留末尾可能是 "<think" 前缀的部分
-                    partial = 0
-                    for plen in range(min(len(buffer), len("<think>")), 0, -1):
-                        if buffer.endswith("<think>"[:plen]):
-                            partial = plen
-                            break
-                    output += buffer[:len(buffer) - partial]
-                    buffer = buffer[len(buffer) - partial:]
-                    break
-                output += buffer[:start]
-                buffer = buffer[start + len("<think>"):]
-                in_think = True
-        if output:
-            emitted = cite_filter.feed(output)
-            if emitted:
-                filtered_answer.append(emitted)
-                yield {"type": "answer_delta", "content": emitted}
-
-    tail = cite_filter.flush()
-    if tail:
-        filtered_answer.append(tail)
-
-    # 流结束时若 think 块仍未闭合（异常中断），丢弃残留 buffer
-    # 推送完整 answer 供 done 事件使用（已过滤 think）
-    yield {"type": "synth_answer_full", "content": "".join(filtered_answer)}
-
-
-# 显式导出（strip_think 用于 import 兼容性，避免外部依赖 nodes.strip_think）
-__all__ = ["_direct_chat_stream"]
+    yield from stream_answer_events(stream, "chat_stream")

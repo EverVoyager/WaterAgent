@@ -5,10 +5,12 @@
 守门、五个实验模块的编排逻辑（注入假 run_fn/run_case 验证对照计算）、
 报告量化声明表渲染。
 """
+
 from unittest.mock import patch
 
 import pytest
 
+import agent.graph.run_context as _run_context
 from agent.tools.mock_executor import clear_replay_context
 from app.core.config import get_settings
 from evals import cases as cases_mod
@@ -79,12 +81,11 @@ class TestToggle:
 
     def test_patch_toggle_off_fn(self):
         toggle = Toggle(kind="patch",
-                        target="agent.graph.runner._compact_history_entry",
+                        target='agent.graph.run_context._compact_history_entry',
                         off_fn=lambda history, *a, **kw: history)
         history = [{"role": "user", "content": "x"}]
-        import agent.graph.runner as runner_pkg
         with toggles_applied([toggle]):
-            assert runner_pkg._compact_history_entry(list(history)) == history
+            assert _run_context._compact_history_entry(list(history)) == history
 
     def test_empty_toggles_noop(self):
         with toggles_applied([]):
@@ -440,11 +441,10 @@ class TestCompressionExperiment:
     def test_compression_disabled_identity(self):
         from evals.experiments.compression import compression_disabled
         history = [{"role": "user", "content": "x"}]
-        import agent.graph.runner as runner_pkg
-        original = runner_pkg._compact_history_entry
+        original = _run_context._compact_history_entry
         with compression_disabled():
-            assert runner_pkg._compact_history_entry(list(history)) == history
-        assert runner_pkg._compact_history_entry is original
+            assert _run_context._compact_history_entry(list(history)) == history
+        assert _run_context._compact_history_entry is original
 
     def test_run_compression_experiment_structure(self):
         from evals.experiments import compression as comp_exp
@@ -571,6 +571,22 @@ class TestKvCacheExperiment:
         assert result["planner_hit_frozen"] == pytest.approx(0.9)
         assert result["planner_hit_broken"] == 0.0
         reset_cache_stats()
+
+    def test_prefix_patch_keeps_query_argument(self, monkeypatch):
+        from evals.experiments import kv_cache as kv_exp
+
+        monkeypatch.setenv("KV_CACHE_WARMUP", "0")
+        prompts = []
+
+        def fake_run_script(station, model_label=""):
+            prompts.append(kv_exp._planner_context._build_planner_system_prompt("吴堡站水情"))
+
+        with patch.object(kv_exp._planner_context, "_build_planner_system_prompt",
+                          side_effect=lambda query: f"prompt:{query}"), \
+             patch.object(kv_exp, "_run_session_script", side_effect=fake_run_script):
+            kv_exp.run_kv_cache_experiment()
+        assert prompts[0] == "prompt:吴堡站水情"
+        assert prompts[1].startswith(prompts[0] + "\n<!-- eval-nonce:")
 
 
 # ============ 训练阶梯实验（experiments/model_ladder.py） ============

@@ -52,10 +52,10 @@ def _deserialize(s: str) -> Scenario:
 def rule_reward(completions, scenario, **kwargs) -> list:
     """trl reward_func：每条补全算 reward = gate × (r1+r2+r3)。
 
-    rag_hits：训练期用确定性 mock 检索结果（mock_executor._mock_search_regulation
+    rag_hits：训练期用确定性 mock 检索结果（mock_results._mock_search_regulation
     的固定文档集），与场景无关，保证可复现。
     """
-    from agent.tools.mock_executor import _mock_search_regulation
+    from agent.tools.mock_results import _mock_search_regulation
     from agent.tools.schemas import SearchRegulationParams
 
     rewards = []

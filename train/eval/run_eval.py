@@ -16,7 +16,7 @@ for _p in (_PROJECT_ROOT, _BACKEND_ROOT):
 
 from openai import OpenAI  # noqa: E402
 
-from agent.tools.mock_executor import _mock_search_regulation  # noqa: E402
+from agent.tools.mock_results import _mock_search_regulation  # noqa: E402
 from agent.tools.schemas import SearchRegulationParams  # noqa: E402
 from train.data_gen.scenario import generate_scenarios  # noqa: E402
 from train.rewards.composite import compute_reward  # noqa: E402

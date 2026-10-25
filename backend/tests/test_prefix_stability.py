@@ -13,15 +13,9 @@ import json
 import re
 from unittest.mock import patch
 
-from agent.graph.nodes import (
-    _build_fc_round1_messages,
-    _build_planner_system_prompt,
-    planner_node,
-)
-from agent.graph.synthesizer_node import (
-    _build_synth_messages,
-    _build_synth_system_content,
-)
+from agent.graph.planner import planner_node
+from agent.graph.planner_context import _build_fc_round1_messages, _build_planner_system_prompt
+from agent.graph.synthesis.context import _build_synth_messages, _build_synth_system_content
 from agent.skills.models import Skill
 from agent.skills.store import get_enabled_skills_brief
 from agent.tools.schemas import build_openai_tools
@@ -53,7 +47,7 @@ def _run_planner_round1(query="吴堡站当前水情如何", planned=None):
     ]
     with patch("agent.skills.match_skill", return_value=None), \
          patch("agent.memory.get_relevant_experiences", return_value=""), \
-         patch("agent.graph.nodes._plan_via_fc", return_value=_mock_plan(planned)):
+         patch('agent.graph.planner._plan_via_fc', return_value=_mock_plan(planned)):
         return planner_node({
             "user_query": query, "rounds": 0, "history": [],
             "tool_results": {}, "tool_calls": [], "skill_instructions": "",
@@ -80,7 +74,7 @@ class TestPlannerStaticPrefix:
         r1 = _run_planner_round1()
         fc1 = r1["fc_messages"]
 
-        with patch("agent.graph.nodes._plan_via_fc",
+        with patch('agent.graph.planner._plan_via_fc',
                    return_value=_mock_plan([])) as mock_plan:
             r2 = planner_node({
                 "user_query": "吴堡站当前水情如何", "rounds": 1,
@@ -147,7 +141,7 @@ class TestStatusBar:
     def test_status_bar_round2_trailing_message(self):
         """第 2 轮起状态提示作为末尾追加的 user 消息（system-reminder 式）。"""
         r1 = _run_planner_round1()
-        with patch("agent.graph.nodes._plan_via_fc", return_value=_mock_plan([])) as mock_plan:
+        with patch('agent.graph.planner._plan_via_fc', return_value=_mock_plan([])) as mock_plan:
             planner_node({
                 "user_query": "吴堡站当前水情如何", "rounds": 1,
                 "fc_messages": r1["fc_messages"], "tool_results": {},
@@ -199,7 +193,7 @@ class TestPlannerContextPersistedInState:
         with patch("agent.memory.get_relevant_experiences", return_value="EXP_TEXT"), \
              patch("agent.graph.context_compact.extract_history_context", return_value="HIST_TEXT"), \
              patch("agent.skills.match_skill", return_value=None), \
-             patch("agent.graph.nodes._plan_via_fc", return_value=_mock_plan([])):
+             patch('agent.graph.planner._plan_via_fc', return_value=_mock_plan([])):
             result = planner_node({
                 "user_query": "吴堡站水情",
                 "rounds": 0,
@@ -218,7 +212,7 @@ class TestPlannerContextPersistedInState:
 
         with patch("agent.memory.get_relevant_experiences", side_effect=_forbidden), \
              patch("agent.graph.context_compact.extract_history_context", side_effect=_forbidden), \
-             patch("agent.graph.nodes._plan_via_fc", return_value=_mock_plan([])):
+             patch('agent.graph.planner._plan_via_fc', return_value=_mock_plan([])):
             result = planner_node({
                 "user_query": "吴堡站水情",
                 "rounds": 1,

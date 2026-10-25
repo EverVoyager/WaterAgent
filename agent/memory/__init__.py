@@ -28,11 +28,8 @@ from agent.memory.memory_store import (
     get_memory_store,
     is_memory_enabled,
 )
-from agent.memory.reflection import (
-    check_memory_safety,
-    run_reflection_async,
-    should_reflect,
-)
+from agent.memory.reflection import run_reflection_async, should_reflect
+from agent.memory.safety import check_memory_safety
 
 __all__ = [
     # memory_store（反思审计）

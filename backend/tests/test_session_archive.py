@@ -8,10 +8,14 @@
 其余：语义分段、归档幂等（含工具数据覆盖）、压缩产出、按需还原匹配、
 压缩标记双兼容。
 """
+
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+import agent.memory.archive_storage as _archive_storage
+import agent.memory.session_recall as _session_recall
+import agent.memory.session_segments as _session_segments
 from agent.memory import session_archive as sa
 from app.core.config import get_settings
 
@@ -57,7 +61,7 @@ def archive_env(tmp_path, monkeypatch):
     monkeypatch.setenv("SESSION_ARCHIVE_DIR", str(tmp_path / "session_archive"))
     monkeypatch.setenv("SESSION_ARCHIVE_ENABLED", "true")
     get_settings.cache_clear()
-    sa._EMB_CACHE.clear()
+    _session_segments._EMB_CACHE.clear()
 
     def _fake(query):
         return [list(map(float, v)) for v in _fake_embed_texts(query)]
@@ -66,7 +70,7 @@ def archive_env(tmp_path, monkeypatch):
         yield tmp_path / "session_archive"
 
     get_settings.cache_clear()
-    sa._EMB_CACHE.clear()
+    _session_segments._EMB_CACHE.clear()
 
 
 def _mock_summary_llm(counter, texts=None):
@@ -88,41 +92,41 @@ def _mock_summary_llm(counter, texts=None):
 
 class TestSegmentation:
     def test_semantic_boundary_splits(self, archive_env):
-        rounds = sa.extract_rounds(_round_history(
+        rounds = _session_segments.extract_rounds(_round_history(
             ("吴堡站水情如何", "流量 537"),
             ("吴堡站水位多少", "水位 636"),
             ("吕梁天气怎么样", "晴 26 度"),
             ("明天降雨大吗", "小雨"),
         ))
-        segs = sa.segment_rounds(rounds)
+        segs = _session_segments.segment_rounds(rounds)
         assert len(segs) == 2  # 水情段 + 天气段
         assert len(segs[0].rounds) == 2
         assert len(segs[1].rounds) == 2
 
     def test_same_topic_single_segment(self, archive_env):
-        rounds = sa.extract_rounds(_round_history(
+        rounds = _session_segments.extract_rounds(_round_history(
             ("吴堡站水情如何", "流量 537"),
             ("吴堡站水位多少", "水位 636"),
         ))
-        assert len(sa.segment_rounds(rounds)) == 1
+        assert len(_session_segments.segment_rounds(rounds)) == 1
 
     def test_embedding_failure_single_segment(self, archive_env):
         with patch("agent.rag.embedding.embed_texts", return_value=None):
-            rounds = sa.extract_rounds(_round_history(
+            rounds = _session_segments.extract_rounds(_round_history(
                 ("吴堡站水情如何", "a"), ("吕梁天气怎么样", "b"),
             ))
-            segs = sa.segment_rounds(rounds)
+            segs = _session_segments.segment_rounds(rounds)
             assert len(segs) == 1  # 降级单段
 
     def test_boundaries_only_grow(self, archive_env):
         """KV 不变量 3：追加新轮次不改旧边界。"""
-        rounds = sa.extract_rounds(_round_history(
+        rounds = _session_segments.extract_rounds(_round_history(
             ("吴堡站水情如何", "a"), ("吕梁天气怎么样", "b"),
         ))
-        old = sa.segment_rounds(rounds)
+        old = _session_segments.segment_rounds(rounds)
         old_fps = [s.first_fp for s in old]
-        rounds.append(sa.Round(query="吴堡流量预测", answer="c"))
-        new = sa.segment_rounds(rounds)
+        rounds.append(_session_segments.Round(query="吴堡流量预测", answer="c"))
+        new = _session_segments.segment_rounds(rounds)
         assert [s.first_fp for s in new][:len(old_fps)] == old_fps
         assert len(new) >= len(old)
 
@@ -131,16 +135,16 @@ class TestSegmentation:
 
 class TestArchive:
     def test_archive_idempotent(self, archive_env):
-        rounds = sa.extract_rounds(_round_history(
+        rounds = _session_segments.extract_rounds(_round_history(
             ("吴堡站水情如何", "流量 537"), ("吴堡站水位多少", "水位 636"),
         ))
-        segs = sa.segment_rounds(rounds)
-        sa.archive_rounds(segs)
+        segs = _session_segments.segment_rounds(rounds)
+        _archive_storage.archive_rounds(segs)
         files1 = sorted(p.name for p in archive_env.glob("*.md"))
-        sa.archive_rounds(segs)  # 二次归档幂等
+        _archive_storage.archive_rounds(segs)  # 二次归档幂等
         files2 = sorted(p.name for p in archive_env.glob("*.md"))
         assert files1 == files2 and len(files1) == 1
-        meta = sa._load_meta(segs[0].first_fp)
+        meta = _archive_storage._load_meta(segs[0].first_fp)
         assert meta["round_fps"] == [r.fp for r in rounds]
 
     def test_completed_round_with_tool_data(self, archive_env):
@@ -151,22 +155,22 @@ class TestArchive:
               "result": {"flow_m3_s": 582}, "error": ""}],
             warning_level="IV",
         )
-        segs = sa.segment_rounds(sa.extract_rounds(history))
-        body = sa._read_body(segs[0].first_fp)
+        segs = _session_segments.segment_rounds(_session_segments.extract_rounds(history))
+        body = _archive_storage._read_body(segs[0].first_fp)
         assert "get_hydrology" in body          # 工具轨迹已落盘
         assert "预警等级：IV" in body
-        meta = sa._load_meta(segs[0].first_fp)
+        meta = _archive_storage._load_meta(segs[0].first_fp)
         assert len(meta["round_fps"]) == 2      # 本轮已追加进段
 
     def test_tool_data_overrides_plain(self, archive_env):
         """收尾归档的含工具版本覆盖入口归档的纯文本版本。"""
-        r = sa.Round(query="吴堡站水情如何", answer="流量 537")
-        seg = sa.Segment(rounds=[r])
-        sa.upsert_round(seg.first_fp, seg.rounds, r, tool_data="")
-        sa.upsert_round(seg.first_fp, seg.rounds, r, tool_data="- get_hydrology → ok")
-        body = sa._read_body(seg.first_fp)
+        r = _session_segments.Round(query="吴堡站水情如何", answer="流量 537")
+        seg = _session_segments.Segment(rounds=[r])
+        _archive_storage.upsert_round(seg.first_fp, seg.rounds, r, tool_data="")
+        _archive_storage.upsert_round(seg.first_fp, seg.rounds, r, tool_data="- get_hydrology → ok")
+        body = _archive_storage._read_body(seg.first_fp)
         assert "get_hydrology" in body
-        meta = sa._load_meta(seg.first_fp)
+        meta = _archive_storage._load_meta(seg.first_fp)
         assert meta["round_fps"] == [r.fp]  # 轮数不重复
 
 
@@ -175,11 +179,11 @@ class TestArchive:
 class TestFrozenSummaries:
     def test_summary_generated_once_and_frozen(self, archive_env):
         counter = {"n": 0}
-        rounds = sa.extract_rounds(_round_history(
+        rounds = _session_segments.extract_rounds(_round_history(
             ("吴堡站水情如何", "流量 537"), ("吴堡站水位多少", "水位 636"),
         ))
-        seg = sa.Segment(rounds=rounds)
-        sa.archive_rounds([seg])
+        seg = _session_segments.Segment(rounds=rounds)
+        _archive_storage.archive_rounds([seg])
         with patch("app.core.llm.get_llm_client", _mock_summary_llm(counter)):
             s1 = sa.ensure_summaries(seg, needed_covered=2, seg_index=0)
             s2 = sa.ensure_summaries(seg, needed_covered=2, seg_index=0)
@@ -192,14 +196,14 @@ class TestFrozenSummaries:
     def test_continuation_summary_appends(self, archive_env):
         """段追加新轮：旧摘要不变，续摘要追加。"""
         counter = {"n": 0}
-        r1 = sa.Round(query="吴堡站水情如何", answer="流量 537")
-        seg2 = sa.Segment(rounds=[r1])
-        sa.archive_rounds([seg2])
+        r1 = _session_segments.Round(query="吴堡站水情如何", answer="流量 537")
+        seg2 = _session_segments.Segment(rounds=[r1])
+        _archive_storage.archive_rounds([seg2])
         with patch("app.core.llm.get_llm_client", _mock_summary_llm(counter)):
             first = sa.ensure_summaries(seg2, needed_covered=1, seg_index=0)
 
-        r2 = sa.Round(query="吴堡站水位多少", answer="水位 636")
-        seg4 = sa.Segment(rounds=[r1, r2])
+        r2 = _session_segments.Round(query="吴堡站水位多少", answer="水位 636")
+        seg4 = _session_segments.Segment(rounds=[r1, r2])
         with patch("app.core.llm.get_llm_client", _mock_summary_llm(counter)):
             second = sa.ensure_summaries(seg4, needed_covered=2, seg_index=0)
 
@@ -208,13 +212,13 @@ class TestFrozenSummaries:
         assert counter["n"] == 2                   # 只为新增轮调 LLM
 
     def test_llm_failure_fallback_not_frozen(self, archive_env):
-        rounds = sa.extract_rounds(_round_history(("吴堡站水情如何", "流量 537")))
-        seg = sa.Segment(rounds=rounds)
-        sa.archive_rounds([seg])
+        rounds = _session_segments.extract_rounds(_round_history(("吴堡站水情如何", "流量 537")))
+        seg = _session_segments.Segment(rounds=rounds)
+        _archive_storage.archive_rounds([seg])
         with patch("app.core.llm.get_llm_client", side_effect=Exception("llm down")):
             texts = sa.ensure_summaries(seg, needed_covered=1, seg_index=0)
         assert len(texts) == 1 and "意图" in texts[0]   # 规则提取降级
-        assert sa._load_meta(seg.first_fp)["summaries"] == []  # 未冻结（下次重试）
+        assert _archive_storage._load_meta(seg.first_fp)["summaries"] == []  # 未冻结（下次重试）
 
 
 # ============ 压缩产出 ============
@@ -294,14 +298,14 @@ class TestCompactWithSegments:
 
 class TestReadArchiveFile:
     def _make_archive(self, archive_env, query="吴堡站水情如何", answer="流量 537") -> str:
-        rounds = sa.extract_rounds(_round_history((query, answer)))
-        seg = sa.Segment(rounds=rounds)
-        sa.archive_rounds([seg])
+        rounds = _session_segments.extract_rounds(_round_history((query, answer)))
+        seg = _session_segments.Segment(rounds=rounds)
+        _archive_storage.archive_rounds([seg])
         return f"{seg.first_fp}.md"
 
     def test_read_returns_body_without_frontmatter(self, archive_env):
         filename = self._make_archive(archive_env)
-        result = sa.read_archive_file(filename)
+        result = _archive_storage.read_archive_file(filename)
         assert result["file"] == filename
         assert "流量 537" in result["content"]
         assert "meta:" not in result["content"]      # frontmatter 剥离
@@ -312,19 +316,19 @@ class TestReadArchiveFile:
         for bad in ("../evil.md", "foo.md", "abc", "", "0123456789abcdef.md.exe",
                     "/tmp/x.md", "..\\..\\x.md"):
             with pytest.raises(ValueError):
-                sa.read_archive_file(bad)
+                _archive_storage.read_archive_file(bad)
 
     def test_missing_file_raises(self, archive_env):
         with pytest.raises(FileNotFoundError):
-            sa.read_archive_file("0123456789abcdef.md")
+            _archive_storage.read_archive_file("0123456789abcdef.md")
 
     def test_long_content_truncated(self, archive_env):
         filename = self._make_archive(
             archive_env, answer="水位数据。" * 5000)  # 远超 8000 字符
-        result = sa.read_archive_file(filename)
+        result = _archive_storage.read_archive_file(filename)
         assert result["truncated"] is True
-        assert len(result["content"]) == sa.ARCHIVE_READ_MAX_CHARS
-        assert result["total_chars"] > sa.ARCHIVE_READ_MAX_CHARS
+        assert len(result["content"]) == _archive_storage.ARCHIVE_READ_MAX_CHARS
+        assert result["total_chars"] > _archive_storage.ARCHIVE_READ_MAX_CHARS
 
     def test_real_executor_tool_roundtrip(self, archive_env):
         """read_session_archive 工具（real_executor 透传层）返回结构过闸。"""
@@ -347,9 +351,9 @@ class TestRecall:
             ("吕梁天气怎么样", "晴"),
             ("明天降雨大吗", "小雨"),
         )
-        segs = sa.segment_rounds(sa.extract_rounds(history))
-        sa.archive_rounds(segs)
-        recalled = sa.recall_relevant_segments(
+        segs = _session_segments.segment_rounds(_session_segments.extract_rounds(history))
+        _archive_storage.archive_rounds(segs)
+        recalled = _session_recall.recall_relevant_segments(
             "吴堡站流量多少", history, keep_recent_rounds=1,
         )
         assert "流量 537" in recalled       # 还原了水情段全文
@@ -360,18 +364,18 @@ class TestRecall:
             ("吴堡站水情如何", "流量 537"),
             ("吴堡站水位多少", "水位 636"),
         )
-        sa.archive_rounds(sa.segment_rounds(sa.extract_rounds(history)))
+        _archive_storage.archive_rounds(_session_segments.segment_rounds(_session_segments.extract_rounds(history)))
         # 预案主题与水情段正交（余弦 0）→ 无命中
-        assert sa.recall_relevant_segments(
+        assert _session_recall.recall_relevant_segments(
             "生成防汛应急预案", history, keep_recent_rounds=0,
         ) == ""
 
     def test_recall_keyword_fallback(self, archive_env):
         history = _round_history(("吴堡站水情如何", "流量 537"))
-        sa.archive_rounds(sa.segment_rounds(sa.extract_rounds(history)))
+        _archive_storage.archive_rounds(_session_segments.segment_rounds(_session_segments.extract_rounds(history)))
         with patch("agent.rag.embedding.embed_texts", return_value=None):
-            sa._EMB_CACHE.clear()
-            recalled = sa.recall_relevant_segments(
+            _session_segments._EMB_CACHE.clear()
+            recalled = _session_recall.recall_relevant_segments(
                 "吴堡站水情", history, keep_recent_rounds=0,
             )
         assert "流量 537" in recalled and "关键词降级" in recalled
