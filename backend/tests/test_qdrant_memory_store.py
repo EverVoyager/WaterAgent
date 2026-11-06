@@ -336,15 +336,24 @@ def test_reflection_writers_continue_independently_after_primary_failure():
     ]
 
 
-async def test_api_content_crud_without_mysql_and_uuid_or_integer_paths(monkeypatch):
+@pytest.mark.parametrize("usage_stats,expected_hit_count", [(None, None), ({}, 0)],
+                         ids=["unavailable", "zero_hits"])
+async def test_api_content_crud_with_usage_states_and_uuid_or_integer_paths(
+    monkeypatch, usage_stats, expected_hit_count,
+):
     monkeypatch.setattr(get_settings(), "MEMORY_ADMIN_API_KEY", "")
     monkeypatch.setattr(memories, "is_memory_enabled", lambda: False)
+    # 统计层独立于反思审计开关，显式隔离，避免依赖 CI 是否配置 MySQL。
+    usage = MagicMock(spec=UsageStore)
+    usage.get_stats.return_value = usage_stats
+    monkeypatch.setattr("agent.memory.usage_store.get_usage_store", lambda: usage)
     app = FastAPI()
     app.include_router(memories.router)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         result = await client.post("/api/memories/semantic", json=BODIES["semantic"])
         assert result.status_code == 201, result.text
-        assert result.json()["hit_count"] is None and result.json()["evidence"]
+        assert result.json()["hit_count"] == expected_hit_count
+        assert result.json()["evidence"]
         mid = result.json()["id"]
         assert (await client.get("/api/memories/semantic")).json()["total"] == 1
         assert (await client.delete(f"/api/memories/semantic/{mid}")).status_code == 200
@@ -357,10 +366,12 @@ async def test_api_content_crud_without_mysql_and_uuid_or_integer_paths(monkeypa
         assert (await client.post("/api/memories/semantic", json=unsafe)).status_code == 422
         vi.put_record("episode", BODIES["episode"])
         vi.put_record("procedure", BODIES["procedure"])
-        assert (await client.get("/api/memories/episodes")).json()["items"][0]["event_id"] == "event:rain"
+        episode = (await client.get("/api/memories/episodes")).json()["items"][0]
+        assert episode["event_id"] == "event:rain"
+        assert episode["hit_count"] == expected_hit_count
         proc = (await client.get("/api/memories/procedures")).json()["items"][0]
         assert proc["steps"][0]["tool"] == "get_weather" and "tool_sequence" not in proc
-        assert proc["hit_count"] is None
+        assert proc["hit_count"] == expected_hit_count
         store = SemanticStore()
         monkeypatch.setattr(memories, "get_semantic_store", lambda: store)
         monkeypatch.setattr(store, "get_by_ids", MagicMock(side_effect=RuntimeError("offline")))
