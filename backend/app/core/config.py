@@ -128,8 +128,8 @@ class Settings(BaseSettings):
     SESSION_ARCHIVE_TOP_K: int = 2
     SESSION_ARCHIVE_MAX_AGE_DAYS: int = 30
 
-    # MySQL 配置（自进化长期记忆存储）
-    # 留空则禁用自进化（reflection 仍可运行但记忆不持久化）
+    # MySQL 保存会话、Skill、反思审计与记忆计数；三类自动记忆正文在 Qdrant。
+    # 密码留空仅禁用这些 SQL 功能，不影响 Qdrant 正文或文件记忆。
     MYSQL_HOST: str = "127.0.0.1"
     MYSQL_PORT: int = 3306
     MYSQL_USER: str = "root"
@@ -143,7 +143,7 @@ class Settings(BaseSettings):
     MEMORY_FILE: str = "MEMORY.md"
     MEMORY_DIR: str = "memory"
     # Curator 后台治理（借鉴 Hermes Agent v0.12.0 Curator）：
-    # 周期性剪枝僵尸记忆 / LLM 压缩合并 / 向量索引对账 / 写治理报告
+    # 周期性剪枝僵尸记忆 / 重复项合并 / 程序提炼晋升 / 写治理报告
     CURATOR_ENABLED: bool = True
     # 治理周期（小时），默认 168h = 7 天（对齐 Hermes Curator 的 7-day cycle）
     CURATOR_INTERVAL_HOURS: int = 168

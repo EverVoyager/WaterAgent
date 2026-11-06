@@ -1,258 +1,238 @@
-"""记忆语义索引（Qdrant 向量检索）——五类记忆架构版。
-
-为 MySQL 中的三类可检索记忆（语义/情景/程序）建立向量索引，注入时按语义
-相关性检索，替代时间倒序盲注（"问太原天气却注入吴堡站水位"的问题根源）。
-
-Collections（与法规检索的 water_regulations 隔离，point id = MySQL 行 id）：
-- agent_semantic_vec   — 语义记忆（embed title+content）
-- agent_episodes_vec   — 情景记忆（embed event_summary+resolution）
-- agent_procedures_vec — 程序记忆（embed applicability）
-
-三态约定（调用方据此降级）：
-- None = 索引不可用（Qdrant/embedding 失败）→ 调用方回退时间倒序/LIKE
-- []   = 索引可用但无语义相关结果 → 不回退不注入（防无关记忆污染）
-- 非空 = 按相关性排序的命中
-"""
+"""三类记忆的 Qdrant 主存：payload 是正文，不从 SQL 重建或回表读取。"""
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any
+from uuid import UUID, uuid4
 
 from qdrant_client.http import models as qmodels
 
-from agent.rag.embedding import embed_query, embed_texts
+from agent.memory.records import validate_body
+from agent.rag.embedding import embed_query
+from agent.utils import now_iso
 from app.core.llm import get_qdrant_client, get_qdrant_config
 
 logger = logging.getLogger(__name__)
 
-SEMANTIC_COLLECTION = "agent_semantic_vec"
-EPISODE_COLLECTION = "agent_episodes_vec"
-PROCEDURE_COLLECTION = "agent_procedures_vec"
-
-# 语义相关性阈值：低于此分数视为无关（与 skill matcher 的 0.55 相比略低，
-# 因为记忆内容与 query 的表述差异通常更大）
+SEMANTIC_COLLECTION = "agent_semantic_v2"
+EPISODE_COLLECTION = "agent_episodes_v2"
+PROCEDURE_COLLECTION = "agent_procedures_v2"
+COLLECTIONS = {"semantic": SEMANTIC_COLLECTION, "episode": EPISODE_COLLECTION,
+               "procedure": PROCEDURE_COLLECTION}
 MIN_SCORE = 0.35
 
 
+def is_older(value: str, days: int) -> bool:
+    try:
+        stamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    # 旧数据时区未知时保留原文，不根据猜测的时间执行删除。
+    return stamp.tzinfo is not None and stamp < datetime.now(timezone.utc) - timedelta(days=days)
+
+
+def point_id(value: int | str | UUID) -> int | str:
+    """Qdrant 原生 ID：兼容迁移前的整数，新记录使用 UUID。"""
+    if type(value) is int and 0 <= value < 2**64:
+        return value
+    if isinstance(value, str) and value.isdecimal():
+        number = int(value)
+        if 0 <= number < 2**64:
+            return number
+    try:
+        return str(UUID(str(value)))
+    except (ValueError, TypeError, AttributeError) as e:
+        raise ValueError("无效的记忆 ID") from e
+
+
 def _collection_ready(collection: str) -> bool:
-    """检查 Qdrant 可达且 collection 存在（不存在则创建）。"""
     try:
         client = get_qdrant_client()
-        cols = [c.name for c in client.get_collections().collections]
-        if collection not in cols:
-            client.create_collection(
-                collection_name=collection,
-                vectors_config=qmodels.VectorParams(
-                    size=get_qdrant_config()["vector_size"],
-                    distance=qmodels.Distance.COSINE,
-                ),
-            )
-            logger.info("[memory-vec] 已创建 collection: %s", collection)
+        if not client.collection_exists(collection):
+            try:
+                client.create_collection(
+                    collection_name=collection,
+                    vectors_config=qmodels.VectorParams(
+                        size=get_qdrant_config()["vector_size"], distance=qmodels.Distance.COSINE,
+                    ),
+                )
+            except Exception:
+                if not client.collection_exists(collection):
+                    raise
+        config = client.get_collection(collection).config.params.vectors
+        if (not isinstance(config, qmodels.VectorParams)
+                or config.size != get_qdrant_config()["vector_size"]
+                or config.distance != qmodels.Distance.COSINE):
+            raise RuntimeError("记忆集合与当前 embedding 维度或距离类型不一致")
         return True
     except Exception as e:
-        logger.debug("[memory-vec] Qdrant 不可用（%s）：%s", collection, e)
+        logger.warning("[memory-qdrant] 集合不可用 %s：%s", collection, type(e).__name__)
         return False
 
 
-# ====== 泛化操作（三 collection 参数化） ======
+def _filter(kind: str, status: str | None = None) -> qmodels.Filter:
+    conditions = [qmodels.FieldCondition(key="memory_type", match=qmodels.MatchValue(value=kind)),
+                  qmodels.FieldCondition(key="schema_version", match=qmodels.MatchValue(value=2))]
+    if status:
+        conditions.append(qmodels.FieldCondition(key="status", match=qmodels.MatchValue(value=status)))
+    return qmodels.Filter(must=conditions)
 
-def _index_one(collection: str, row_id: int, embed_text: str,
-               payload: dict[str, Any]) -> bool:
-    """写入/更新单条向量。失败返回 False（不影响主流程）。"""
-    if not isinstance(row_id, int) or not embed_text:
-        return False
+
+def _decode(kind: str, record) -> dict | None:
+    payload = dict(record.payload or {})
+    if payload.pop("memory_type", None) != kind or payload.pop("schema_version", None) != 2:
+        return None
+    created_at, updated_at = payload.pop("created_at", ""), payload.pop("updated_at", "")
     try:
-        if not _collection_ready(collection):
-            return False
-        vec = embed_query(embed_text)
-        if vec is None:
-            logger.warning("[memory-vec] embedding 失败 %s id=%s", collection, row_id)
-            return False
+        body = validate_body(kind, payload)
+    except (ValueError, TypeError):
+        logger.warning("[memory-qdrant] 跳过不符合正文结构或安全校验的记录 %s id=%s", kind, record.id)
+        return None
+    return {**body, "id": record.id, "created_at": created_at, "updated_at": updated_at}
+
+
+def get_records(kind: str, ids: list[int | str]) -> list[dict]:
+    if not ids:
+        return []
+    collection = COLLECTIONS[kind]
+    if not _collection_ready(collection):
+        raise RuntimeError("Qdrant 记忆正文不可用")
+    points = get_qdrant_client().retrieve(
+        collection_name=collection, ids=[point_id(mid) for mid in ids], with_payload=True,
+    )
+    return [row for record in points if (row := _decode(kind, record)) is not None]
+
+
+def iter_records(kind: str):
+    collection = COLLECTIONS[kind]
+    if not _collection_ready(collection):
+        raise RuntimeError("Qdrant 记忆正文不可用")
+    offset = None
+    while True:
+        points, offset = get_qdrant_client().scroll(
+            collection_name=collection, scroll_filter=_filter(kind), limit=100,
+            offset=offset, with_payload=True,
+        )
+        for record in points:
+            if (row := _decode(kind, record)) is not None:
+                yield row
+        if offset is None:
+            break
+
+
+def list_records(kind: str, limit: int = 100, days_back: int | None = None,
+                 status: str | None = None, outcome: str | None = None) -> list[dict]:
+    # shortcut: 当前小库全量排序，记录规模明显增大时改用 payload 索引分页。
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days_back)).date().isoformat() if days_back else ""
+    rows = [row for row in iter_records(kind)
+            if (not status or row.get("status") == status)
+            and (not outcome or row.get("outcome") == outcome)
+            and (not cutoff or str(row.get("created_at", ""))[:10] >= cutoff)]
+    rows.sort(key=lambda row: str(row.get("created_at", "")), reverse=True)
+    return rows[:limit]
+
+
+def put_record(kind: str, body: dict[str, Any], memory_id: int | str | None = None,
+               created_at: str | None = None, updated_at: str | None = None) -> int | str:
+    body = validate_body(kind, body)
+    memory_id = point_id(memory_id) if memory_id is not None else str(uuid4())
+    collection = COLLECTIONS[kind]
+    if not _collection_ready(collection):
+        raise RuntimeError("Qdrant 记忆正文不可用")
+    if kind == "semantic":
+        text = f"{body['title']}。{body['content']}。适用：{body['reuse_when']}"
+    elif kind == "episode":
+        text = f"{body['event_summary']}。{body['resolution']}"
+    else:
+        text = f"{body['name']}。{body['applicability']}"
+    vector = embed_query(text)
+    if vector is None:
+        raise RuntimeError("记忆 embedding 失败，原正文未修改")
+    vector = vector.tolist() if hasattr(vector, "tolist") else list(vector)
+    stamp = now_iso()
+    payload = {**body, "memory_type": kind, "schema_version": 2,
+               "created_at": created_at or stamp, "updated_at": updated_at or stamp}
+    try:
         get_qdrant_client().upsert(
             collection_name=collection,
-            # kind=memory 与 _sync_all 的过滤删除对齐：缺失该字段的点在对账时
-            # 无法被清理，MySQL 行删除后会残留为幽灵向量占用 top-k 名额
-            points=[qmodels.PointStruct(
-                id=row_id, vector=vec.tolist(), payload={"kind": "memory", **payload})],
+            points=[qmodels.PointStruct(id=memory_id, vector=vector, payload=payload)], wait=True,
+        )
+    except Exception as e:
+        raise RuntimeError(f"记忆写入未确认，请按 ID 核查后重试：{memory_id}") from e
+    return memory_id
+
+
+def update_record(kind: str, memory_id: int | str, changes: dict) -> bool:
+    rows = get_records(kind, [memory_id])
+    if not rows:
+        return False
+    old = rows[0]
+    body = {key: value for key, value in old.items() if key not in ("id", "created_at", "updated_at")}
+    body.update(changes)
+    body = validate_body(kind, body)
+    if set(changes) <= {"status"}:
+        get_qdrant_client().set_payload(
+            collection_name=COLLECTIONS[kind],
+            payload={**{key: body[key] for key in changes}, "updated_at": now_iso()},
+            points=[old["id"]], wait=True,
         )
         return True
-    except Exception as e:
-        logger.debug("[memory-vec] index 失败 %s id=%s：%s", collection, row_id, e)
-        return False
+    # shortcut: 并发编辑采用后完成写入生效，多管理员并发时升级条件更新。
+    put_record(kind, body, memory_id=old["id"], created_at=old["created_at"])
+    return True
 
 
-def _remove_one(collection: str, row_id: int) -> bool:
-    """删除单条向量（MySQL 行删除后调用，保持两侧一致）。"""
-    if not isinstance(row_id, int):
-        return False
-    try:
-        if not _collection_ready(collection):
-            return False
+def delete_records(kind: str, ids: list[int | str]) -> int:
+    if not ids:
+        return 0
+    collection = COLLECTIONS[kind]
+    if not _collection_ready(collection):
+        raise RuntimeError("Qdrant 记忆正文不可用")
+    points = get_qdrant_client().retrieve(
+        collection_name=collection, ids=[point_id(mid) for mid in ids], with_payload=True,
+    )
+    existing = [p.id for p in points if (p.payload or {}).get("memory_type") == kind
+                and (p.payload or {}).get("schema_version") == 2]
+    if existing:
         get_qdrant_client().delete(
             collection_name=collection,
-            points_selector=qmodels.PointIdsList(points=[row_id]),
+            points_selector=qmodels.PointIdsList(points=existing), wait=True,
         )
-        return True
-    except Exception as e:
-        logger.debug("[memory-vec] remove 失败 %s id=%s：%s", collection, row_id, e)
-        return False
+    return len(existing)
 
 
-def _search(
-    collection: str,
-    query: str,
-    top_k: int = 5,
-    min_score: float = MIN_SCORE,
-) -> list[dict[str, Any]] | None:
-    """按语义相关性检索（三态返回：None 不可用 / [] 无相关 / 非空命中）。"""
+def _search(kind: str, query: str, top_k: int, min_score: float = MIN_SCORE) -> list[dict] | None:
     if not query:
-        return None
+        return []
     try:
-        if not _collection_ready(collection):
+        if not _collection_ready(COLLECTIONS[kind]):
             return None
-        vec = embed_query(query)
-        if vec is None:
+        if get_qdrant_client().count(
+            collection_name=COLLECTIONS[kind], count_filter=_filter(kind), exact=True,
+        ).count == 0:
+            return []
+        vector = embed_query(query)
+        if vector is None:
             return None
         response = get_qdrant_client().query_points(
-            collection_name=collection,
-            query=vec.tolist(),
-            limit=top_k,
-            with_payload=True,
+            collection_name=COLLECTIONS[kind],
+            query=vector.tolist() if hasattr(vector, "tolist") else list(vector),
+            query_filter=_filter(kind, "active" if kind == "procedure" else None),
+            limit=top_k, with_payload=True, score_threshold=min_score,
         )
-        results = []
-        for scored in response.points:
-            if float(scored.score) < min_score:
-                continue
-            results.append({
-                "id": scored.id,
-                "score": round(float(scored.score), 4),
-                **(scored.payload or {}),
-            })
-        return results
+        return [{**row, "score": float(record.score)} for record in response.points
+                if float(record.score) >= min_score and (row := _decode(kind, record)) is not None]
     except Exception as e:
-        logger.debug("[memory-vec] search 失败 %s：%s", collection, e)
+        logger.warning("[memory-qdrant] 召回不可用 %s：%s", kind, type(e).__name__)
         return None
 
 
-def _sync_all(collection: str, rows: list[dict[str, Any]]) -> int:
-    """全量同步索引：先 embed 成功再删旧点再 upsert（MySQL 是 source of truth）。
-
-    先 embed 后删点，避免 embed 失败时把索引清空。
-    rows 各项需含 id / embed_text。
-    """
-    try:
-        if not _collection_ready(collection):
-            return 0
-        texts = [r.get("embed_text", "") for r in rows]
-        vectors = embed_texts(texts) if texts else None
-        if texts and vectors is None:
-            return 0  # embed 失败，不动现有索引
-        client = get_qdrant_client()
-        client.delete(
-            collection_name=collection,
-            points_selector=qmodels.FilterSelector(
-                filter=qmodels.Filter(must=[qmodels.FieldCondition(
-                    key="kind", match=qmodels.MatchValue(value="memory")
-                )])
-            ),
-        )
-        if not rows:
-            return 0
-        points = [
-            qmodels.PointStruct(
-                id=int(r["id"]),
-                vector=v.tolist(),
-                payload={"kind": "memory", **r.get("payload", {})},
-            )
-            for r, v in zip(rows, vectors, strict=False)
-        ]
-        client.upsert(collection_name=collection, points=points)
-        logger.info("[memory-vec] 同步 %s：%d points", collection, len(points))
-        return len(points)
-    except Exception as e:
-        logger.debug("[memory-vec] sync 失败 %s：%s", collection, e)
-        return 0
+def search_semantic(query: str, top_k: int = 3) -> list[dict] | None:
+    return _search("semantic", query, top_k)
 
 
-# ====== 语义记忆 ======
-
-def index_semantic(mem_id: int, title: str, content: str) -> bool:
-    return _index_one(
-        SEMANTIC_COLLECTION, mem_id, f"{title}。{content}",
-        {"title": title, "content": content},
-    )
+def search_episodes(query: str, top_k: int = 2) -> list[dict] | None:
+    return _search("episode", query, top_k)
 
 
-def remove_semantic(mem_id: int) -> bool:
-    return _remove_one(SEMANTIC_COLLECTION, mem_id)
-
-
-def search_semantic(query: str, top_k: int = 3) -> list[dict[str, Any]] | None:
-    """语义记忆检索（synthesizer 注入用）。"""
-    return _search(SEMANTIC_COLLECTION, query, top_k)
-
-
-def sync_semantic(rows: list[dict[str, Any]]) -> int:
-    """全量同步（rows 需含 id/title/content）。"""
-    return _sync_all(
-        SEMANTIC_COLLECTION,
-        [{"id": r["id"], "embed_text": f"{r.get('title', '')}。{r.get('content', '')}",
-          "payload": {"title": r.get("title", ""), "content": r.get("content", "")}}
-         for r in rows],
-    )
-
-
-# ====== 情景记忆 ======
-
-def index_episode(episode_id: int, event_summary: str, resolution: str = "") -> bool:
-    return _index_one(
-        EPISODE_COLLECTION, episode_id, f"{event_summary}。{resolution}",
-        {"event_summary": event_summary, "resolution": resolution},
-    )
-
-
-def remove_episode(episode_id: int) -> bool:
-    return _remove_one(EPISODE_COLLECTION, episode_id)
-
-
-def search_episodes(query: str, top_k: int = 2) -> list[dict[str, Any]] | None:
-    """情景记忆检索（planner 注入"历史类似情形"）。"""
-    return _search(EPISODE_COLLECTION, query, top_k)
-
-
-def sync_episodes(rows: list[dict[str, Any]]) -> int:
-    """全量同步（rows 需含 id/event_summary/resolution）。"""
-    return _sync_all(
-        EPISODE_COLLECTION,
-        [{"id": r["id"],
-          "embed_text": f"{r.get('event_summary', '')}。{r.get('resolution', '')}",
-          "payload": {"event_summary": r.get("event_summary", ""),
-                      "resolution": r.get("resolution", "")}}
-         for r in rows],
-    )
-
-
-# ====== 程序记忆 ======
-
-def index_procedure(proc_id: int, applicability: str) -> bool:
-    return _index_one(
-        PROCEDURE_COLLECTION, proc_id, applicability,
-        {"applicability": applicability},
-    )
-
-
-def remove_procedure(proc_id: int) -> bool:
-    return _remove_one(PROCEDURE_COLLECTION, proc_id)
-
-
-def search_procedures(query: str, top_k: int = 2) -> list[dict[str, Any]] | None:
-    """程序记忆检索（planner 注入"推荐方法"）。"""
-    return _search(PROCEDURE_COLLECTION, query, top_k)
-
-
-def sync_procedures(rows: list[dict[str, Any]]) -> int:
-    """全量同步（rows 需含 id/applicability）。"""
-    return _sync_all(
-        PROCEDURE_COLLECTION,
-        [{"id": r["id"], "embed_text": r.get("applicability", ""),
-          "payload": {"applicability": r.get("applicability", "")}}
-         for r in rows],
-    )
+def search_procedures(query: str, top_k: int = 2) -> list[dict] | None:
+    return _search("procedure", query, top_k)

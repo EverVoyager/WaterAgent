@@ -18,6 +18,23 @@ from app.core.config import get_settings
 
 
 @pytest.fixture(autouse=True)
+def memory_qdrant(monkeypatch, request):
+    """单元测试只操作独立内存库，禁止触碰实际的记忆正文集合。"""
+    if request.node.get_closest_marker("integration"):
+        yield None
+        return
+    from qdrant_client import QdrantClient
+
+    from agent.memory import vector_index
+
+    client = QdrantClient(":memory:")
+    monkeypatch.setattr(vector_index, "get_qdrant_client", lambda: client)
+    monkeypatch.setattr(vector_index, "get_qdrant_config", lambda: {"vector_size": 3})
+    yield client
+    client.close()
+
+
+@pytest.fixture(autouse=True)
 def _restore_skills_table():
     """只清理专用测试库，数据库故障立即报错。"""
     if not is_skill_store_enabled():

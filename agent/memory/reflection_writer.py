@@ -1,4 +1,4 @@
-"""反思结果写入：四类记忆分发、索引更新和效果闭环。"""
+"""反思结果写入：四类记忆分发和效果闭环。"""
 import logging
 from typing import Any
 
@@ -42,8 +42,31 @@ def _dispatch_longterm(reflection: dict[str, Any], user_query: str,
     return len(applied)
 
 
-def _dispatch_semantic(reflection: dict[str, Any], user_query: str) -> int:
-    """语义记忆（领域知识）→ agent_semantic + 向量索引。"""
+def _semantic_candidate_violation(mem: dict[str, Any], sources: dict[str, str]) -> str | None:
+    """校验可执行的准入条件；知识分类和证据是否蕴含结论仍由反思模型判断。"""
+    kind = mem.get("knowledge_type")
+    if kind not in ("tool_contract", "project_rule", "domain_fact"):
+        return "非允许的知识类型"
+    reuse_when = mem.get("reuse_when")
+    if not isinstance(reuse_when, str) or not reuse_when.strip():
+        return "缺少具体复用场景"
+    evidence = mem.get("evidence")
+    if not isinstance(evidence, dict):
+        return "缺少来源证据"
+    source_id, quote = evidence.get("source_id"), evidence.get("quote")
+    if not isinstance(source_id, str) or source_id not in sources:
+        return "引用了未提供的来源"
+    if source_id == "user" and kind != "project_rule":
+        return "用户陈述只能支持项目约定"
+    # shortcut: 原文匹配只证明引用存在，需要严格事实证明时增加结论与证据的蕴含校验。
+    if not isinstance(quote, str) or len(quote.strip()) < 8 or quote not in sources[source_id]:
+        return "证据过短或不属于来源原文"
+    return _gate_violation(reuse_when, quote)
+
+
+def _dispatch_semantic(reflection: dict[str, Any], semantic_sources: dict[str, str],
+                       source_ref: str = "") -> int:
+    """语义记忆通过类型/场景/原文证据校验后写入 Qdrant。"""
     try:
         from agent.memory.semantic_store import get_semantic_store
         store = get_semantic_store()
@@ -53,43 +76,47 @@ def _dispatch_semantic(reflection: dict[str, Any], user_query: str) -> int:
         return 0
 
     created = 0
-    for mem in reflection.get("semantic_memories") or []:
+    candidates = reflection.get("semantic_memories") or []
+    if not isinstance(candidates, list):
+        return 0
+    for mem in candidates:
         if not isinstance(mem, dict):
             continue
-        title = str(mem.get("title", "")).strip()
-        content = str(mem.get("content", "")).strip()
+        title, content = mem.get("title"), mem.get("content")
+        if not isinstance(title, str) or not isinstance(content, str):
+            continue
+        title, content = title.strip(), content.strip()
         if not title or not content:
             continue
-        violation = _gate_violation(f"{title}。{content}")
+        violation = (_gate_violation(f"{title}。{content}")
+                     or _semantic_candidate_violation(mem, semantic_sources))
         if violation:
-            logger.warning("[reflection] 拦截不安全语义记忆（%s）：%s", violation, content[:80])
+            logger.info("[reflection] 跳过语义记忆：%s", violation.split(":", 1)[0])
             continue
-        # 写入查重：新知识基本已被近期记忆覆盖 → 跳过（近重复只靠每周压缩兜底太慢）
-        if _semantic_duplicate(store, title, content):
-            logger.info("[reflection] 语义记忆与近期条目近重复，跳过：%s", title[:60])
+        reuse_when = mem["reuse_when"].strip()
+        evidence = [{"source_id": mem["evidence"]["source_id"],
+                     "quote": mem["evidence"]["quote"], "source_ref": source_ref or None}]
+        if _semantic_duplicate(store, title, content, reuse_when, evidence):
+            logger.info("[reflection] 语义记忆正文及条件相同，跳过：%s", title[:60])
             continue
-        tags = mem.get("tags") or []
         mem_id = store.add_semantic(
-            title=title, content=content, source="reflection",
-            tags=",".join(str(t) for t in tags),
+            title=title, content=content, reuse_when=reuse_when, evidence=evidence,
         )
-        if isinstance(mem_id, int):
+        if type(mem_id) in (int, str):
             created += 1
-            _safe_call(_index_semantic, mem_id, title, content)
     return created
 
 
 def _semantic_duplicate(store: Any, title: str, content: str,
-                        threshold: float = 0.8) -> bool:
-    """新语义记忆的二元组被任一近期条目覆盖超阈值 → 判为近重复。"""
-    from agent.utils import text_coverage
-
+                        reuse_when: str, evidence: list[dict]) -> bool:
+    """仅去除正文和适用条件完全一致的重复，数字或条件不同均保留。"""
     try:
         recent = store.list_semantic(limit=50)
-        new_text = f"{title}。{content}"
         return any(
-            text_coverage(new_text,
-                          f"{r.get('title', '')}。{r.get('content', '')}") >= threshold
+            r.get("title", "").strip() == title
+            and r.get("content", "").strip() == content
+            and r.get("reuse_when") == reuse_when
+            and r.get("evidence") == evidence
             for r in recent
         )
     except Exception:
@@ -98,16 +125,9 @@ def _semantic_duplicate(store: Any, title: str, content: str,
 
 def _dispatch_episode(
     reflection: dict[str, Any],
-    user_query: str,
-    tool_calls: list[dict[str, Any]],
-    tool_errors: list[str],
-    rounds: int,
-    trigger_reason: str,
+    source_ref: str = "",
 ) -> int:
-    """情景记忆（本次事件与解法）→ agent_episodes + 向量索引。
-
-    无 episode 输出时按触发原因兜底一条最小记录（保证重大事件不漏记）。
-    """
+    """本次事件与解法写入 Qdrant，来源由服务器附加。"""
     try:
         from agent.memory.episode_store import get_episode_store
         store = get_episode_store()
@@ -117,6 +137,8 @@ def _dispatch_episode(
         return 0
 
     ep = reflection.get("episode") or {}
+    if not isinstance(ep, dict):
+        return 0
     event_summary = str(ep.get("event_summary", "")).strip()
     if not event_summary:
         return 0
@@ -125,7 +147,7 @@ def _dispatch_episode(
     if violation:
         logger.warning("[reflection] 拦截不安全情景记忆（%s）：%s", violation, event_summary[:80])
         return 0
-    outcome = ep.get("outcome", "success")
+    outcome = ep.get("outcome", "partial")
     if outcome not in ("success", "failure", "partial"):
         outcome = "partial"
 
@@ -133,26 +155,18 @@ def _dispatch_episode(
         event_summary=event_summary,
         resolution=resolution,
         outcome=outcome,
-        query_summary=user_query[:512],
-        tool_calls=[
-            {"name": tc.get("tool_name", ""), "arguments": tc.get("arguments", {})}
-            for tc in (tool_calls or [])
-        ],
-        tags=trigger_reason,
+        source_refs=[{"source_ref": source_ref}] if source_ref else [],
+        event_id=source_ref or None,
     )
-    if isinstance(ep_id, int):
-        _safe_call(_index_episode, ep_id, event_summary, resolution)
-        return 1
-    return 0
+    return int(type(ep_id) in (int, str))
 
 
 def _dispatch_procedure(
     reflection: dict[str, Any],
     tool_calls: list[dict[str, Any]],
-    tool_errors: list[str],
-    rounds: int,
+    source_ref: str = "",
 ) -> int:
-    """程序记忆（可复用解决方法）→ agent_procedures + 向量索引。"""
+    """程序记忆（可复用解决方法）写入 Qdrant。"""
     proc = reflection.get("procedure") or {}
     if not isinstance(proc, dict) or not proc.get("worthy") or not tool_calls:
         return 0
@@ -174,37 +188,38 @@ def _dispatch_procedure(
     if violation:
         logger.warning("[reflection] 拦截不安全程序记忆（%s）：%s", violation, name[:80])
         return 0
-    tool_sequence = proc.get("tool_sequence") or [
-        tc.get("tool_name", "") for tc in tool_calls if tc.get("tool_name")
-    ]
-
     proc_id = store.add_procedure(
         name=name, applicability=applicability, steps=steps,
-        tool_sequence=tool_sequence, source="reflection",
+        source_refs=[{"source_ref": source_ref}] if source_ref else [],
     )
-    if isinstance(proc_id, int):
-        _safe_call(_index_procedure, proc_id, applicability)
-        return 1
-    return 0
+    return int(type(proc_id) in (int, str))
 
 
 def _demote_ineffective(
     demote: dict[str, Any],
     injected_memories: list[dict[str, Any]] | None = None,
+    review_context: dict[str, Any] | None = None,
 ) -> int:
-    """效果闭环：注入后仍无效的记忆降权/删除。返回处理数。
+    """语义冲突仅记录待复核；程序记忆仍可停用。返回实际停用数。
 
     只允许处理本次请求真实注入过的 id（injected_memories）：demote 的 id
     来自 LLM 输出，幻觉 id 若不校验会误删任意无关记忆且不可恢复。
     """
-    def _valid_ids(raw: list[Any], allowed: set[int]) -> list[int]:
+    if not isinstance(demote, dict):
+        return 0
+
+    def _valid_ids(raw: list[Any], allowed: set[int | str]) -> list[int | str]:
+        from agent.memory.vector_index import point_id
+
+        if not isinstance(raw, list):
+            return []
         out = []
         for i in raw:
             try:
-                v = int(i)
+                v = point_id(i)
             except (TypeError, ValueError):
                 continue
-            if v in allowed:
+            if v in allowed and v not in out:
                 out.append(v)
         return out
 
@@ -215,15 +230,9 @@ def _demote_ineffective(
     demoted = 0
     semantic_ids = _valid_ids(demote.get("semantic_ids") or [], allowed_semantic)
     if semantic_ids:
-        try:
-            from agent.memory.semantic_store import get_semantic_store
-            store = get_semantic_store()
-            for mid in semantic_ids:
-                if store.delete_semantic(mid):
-                    _safe_call(_remove_semantic, mid)
-                    demoted += 1
-        except Exception:
-            pass
+        if review_context is not None:
+            review_context["semantic_review_ids"] = semantic_ids
+        logger.info("[reflection] 保留疑似冲突的语义记忆，待复核 id=%s", semantic_ids)
     procedure_ids = _valid_ids(demote.get("procedure_ids") or [], allowed_procedure)
     if procedure_ids:
         try:
@@ -240,6 +249,7 @@ def _demote_ineffective(
 def _write_audit(
     user_query: str, trigger_reason: str, tool_summary: str,
     final_answer: str, reflection_text: str, memories_created: int,
+    context: dict[str, Any] | None = None,
 ) -> None:
     """审计日志写 agent_reflections（MySQL 可用时）。"""
     try:
@@ -253,35 +263,7 @@ def _write_audit(
             final_answer=final_answer,
             reflection_text=reflection_text or "(无)",
             memories_created=memories_created,
+            context=context,
         )
     except Exception as e:
         logger.debug("[reflection] 审计写入失败：%s", e)
-
-
-# ====== 向量索引（尽力而为） ======
-
-def _safe_call(fn, *args) -> None:
-    try:
-        fn(*args)
-    except Exception as e:
-        logger.debug("[reflection] 向量索引操作失败：%s", e)
-
-
-def _index_semantic(mem_id: int, title: str, content: str) -> None:
-    from agent.memory import vector_index
-    vector_index.index_semantic(mem_id, title, content)
-
-
-def _index_episode(ep_id: int, event_summary: str, resolution: str) -> None:
-    from agent.memory import vector_index
-    vector_index.index_episode(ep_id, event_summary, resolution)
-
-
-def _index_procedure(proc_id: int, applicability: str) -> None:
-    from agent.memory import vector_index
-    vector_index.index_procedure(proc_id, applicability)
-
-
-def _remove_semantic(mem_id: int) -> None:
-    from agent.memory import vector_index
-    vector_index.remove_semantic(mem_id)

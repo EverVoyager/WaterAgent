@@ -29,9 +29,9 @@ def _is_unsafe_memory_content(content: str) -> bool:
 # 敏感信息特征（对齐 Codex memories 的 redaction：凭据/个人隐私不写入记忆）
 _SENSITIVE_PATTERNS = (
     re.compile(r"sk-[A-Za-z0-9]{16,}"),                    # API key
-    re.compile(r"(?:api[_-]?key|apikey)\s*[:=]\s*\S{8,}", re.I),
-    re.compile(r"(?:password|passwd|pwd)\s*[:=]\s*\S{6,}", re.I),
-    re.compile(r"(?:secret|token)\s*[:=]\s*\S{8,}", re.I),
+    re.compile(r'''(?:api[_-]?key|apikey)["']?\s*[:=]\s*["']?\S{8,}''', re.I),
+    re.compile(r'''(?:password|passwd|pwd)["']?\s*[:=]\s*["']?\S{6,}''', re.I),
+    re.compile(r'''(?:secret|token)["']?\s*[:=]\s*["']?\S{8,}''', re.I),
     re.compile(r"Bearer\s+[A-Za-z0-9_\-\.]{16,}"),
     re.compile(r"1[3-9]\d{9}"),                            # 手机号
     re.compile(r"\d{17}[\dXx]"),                           # 身份证号

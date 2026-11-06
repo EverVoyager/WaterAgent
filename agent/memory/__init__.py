@@ -2,9 +2,10 @@
 
 - 会话记忆：chat_sessions/chat_messages + context_compact（当前会话上下文）
 - 长期记忆：MEMORY.md（用户权威手册）+ memory/ 目录（Agent 自动记忆）——longterm.py
-- 语义记忆：agent_semantic 表 + 向量索引（领域知识/文档）——semantic_store.py
-- 情景记忆：agent_episodes 表 + 向量索引（事件与解决方法）——episode_store.py
-- 程序记忆：agent_procedures 表 + 向量索引（可晋升 Skill 的通用方法）——procedure_store.py
+- 语义记忆：Qdrant 正文（领域知识/文档）——semantic_store.py
+- 情景记忆：Qdrant 正文（事件与解决方法）——episode_store.py
+- 程序记忆：Qdrant 正文（可晋升 Skill 的通用方法）——procedure_store.py
+- 使用统计：agent_memory_usage 表——usage_store.py
 - 反思审计：agent_reflections 表——memory_store.py
 
 反思循环（reflection.py）：触发条件不变，输出分发到长期/语义/情景/程序四类。

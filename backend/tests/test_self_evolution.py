@@ -10,7 +10,6 @@
 - Curator 晋升检查
 """
 
-import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -250,6 +249,14 @@ def _reflection_output(**overrides):
     return base
 
 
+def _semantic_memory(title, content):
+    return {
+        "title": title, "content": content, "tags": [],
+        "knowledge_type": "domain_fact", "reuse_when": f"回答{title}相关问题时",
+        "evidence": {"source_id": "tool:0:search_regulation", "quote": f"{title}：{content}"},
+    }
+
+
 class TestDispatch:
     def test_dispatch_longterm_filters_unsafe(self, mem_env):
         n = _reflection_writer._dispatch_longterm(_reflection_output(longterm_edits=[
@@ -284,15 +291,13 @@ class TestDispatch:
             store.enabled = True
             store.add_semantic.return_value = 42
             mock_get.return_value = store
-            with patch.object(_reflection_writer, "_index_semantic") as mock_idx:
-                n = _reflection_writer._dispatch_semantic(_reflection_output(semantic_memories=[
-                    {"title": "龙门站警戒水位", "content": "377.5m", "tags": []},
-                    {"title": "", "content": "无标题应跳过"},
-                    {"title": "坏", "content": "password=abcdef123"},
-                ]), "query")
-                assert n == 1
-                store.add_semantic.assert_called_once()
-                mock_idx.assert_called_once_with(42, "龙门站警戒水位", "377.5m")
+            n = _reflection_writer._dispatch_semantic(_reflection_output(semantic_memories=[
+                _semantic_memory("龙门站警戒水位", "377.5m"),
+                {"title": "", "content": "无标题应跳过"},
+                {"title": "坏", "content": "password=abcdef123"},
+            ]), {"tool:0:search_regulation": "龙门站警戒水位：377.5m"})
+            assert n == 1
+            store.add_semantic.assert_called_once()
 
     def test_dispatch_episode(self):
         with patch("agent.memory.episode_store.get_episode_store") as mock_get:
@@ -300,19 +305,16 @@ class TestDispatch:
             store.enabled = True
             store.add_episode.return_value = 7
             mock_get.return_value = store
-            tool_calls = [{"tool_name": "get_hydrology", "arguments": {}}]
-            with patch.object(_reflection_writer, "_index_episode") as mock_idx:
-                n = _reflection_writer._dispatch_episode(
-                    _reflection_output(episode={
-                        "event_summary": "府谷站查询无数据",
-                        "resolution": "改查吴堡并说明",
-                        "outcome": "partial",
-                    }), "查府谷水情", tool_calls, [], 1, "tool_failure",
-                )
-                assert n == 1
-                _, kwargs = store.add_episode.call_args
-                assert kwargs["outcome"] == "partial"
-                mock_idx.assert_called_once()
+            n = _reflection_writer._dispatch_episode(
+                _reflection_output(episode={
+                    "event_summary": "府谷站查询无数据",
+                    "resolution": "改查吴堡并说明",
+                    "outcome": "partial",
+                }), "reflection:case7",
+            )
+            assert n == 1
+            _, kwargs = store.add_episode.call_args
+            assert kwargs["outcome"] == "partial"
 
     def test_dispatch_episode_invalid_outcome_normalized(self):
         with patch("agent.memory.episode_store.get_episode_store") as mock_get:
@@ -323,7 +325,7 @@ class TestDispatch:
             _reflection_writer._dispatch_episode(
                 _reflection_output(episode={
                     "event_summary": "x", "resolution": "", "outcome": "weird",
-                }), "q", [], [], 1, "multi_round",
+                }), "reflection:case8",
             )
             assert store.add_episode.call_args.kwargs["outcome"] == "partial"
 
@@ -334,15 +336,13 @@ class TestDispatch:
             store.add_procedure.return_value = 9
             mock_get.return_value = store
             tool_calls = [{"tool_name": "get_weather", "arguments": {}}]
-            with patch.object(_reflection_writer, "_index_procedure") as mock_idx:
-                n = _reflection_writer._dispatch_procedure(_reflection_output(procedure={
-                    "worthy": True, "name": "洪水预判",
-                    "applicability": "询问未来洪水风险时",
-                    "steps": [{"step": 1, "action": "获取降雨", "tool": "get_weather"}],
-                    "tool_sequence": ["get_weather"],
-                }), tool_calls, [], 2)
-                assert n == 1
-                mock_idx.assert_called_once()
+            n = _reflection_writer._dispatch_procedure(_reflection_output(procedure={
+                "worthy": True, "name": "洪水预判",
+                "applicability": "询问未来洪水风险时",
+                "steps": [{"step": 1, "action": "获取降雨", "tool": "get_weather"}],
+                "tool_sequence": ["get_weather"],
+            }), tool_calls, "reflection:case9")
+            assert n == 1
 
     def test_dispatch_procedure_requires_tools(self):
         with patch("agent.memory.procedure_store.get_procedure_store") as mock_get:
@@ -350,7 +350,7 @@ class TestDispatch:
             n = _reflection_writer._dispatch_procedure(
                 _reflection_output(procedure={"worthy": True, "name": "x",
                                               "applicability": "y", "steps": [{}]}),
-                [], [], 1,
+                [],
             )
             assert n == 0  # 无工具调用不写入
 
@@ -360,15 +360,14 @@ class TestDispatch:
 class TestPromoteToSkill:
     def test_promote_creates_disabled_skill(self):
         from agent.memory.procedure_store import ProcedureStore
-        store = ProcedureStore("h", 3306, "u", "p", "d")
+        store = ProcedureStore()
         proc = {
             "id": 1, "name": "汛期多站联合研判",
             "applicability": "多站对比或全段研判",
-            "steps_json": json.dumps([
+            "steps": [
                 {"step": 1, "action": "获取各站实时水情", "tool": "get_hydrology"},
                 {"step": 2, "action": "对比阈值定级", "tool": None},
-            ], ensure_ascii=False),
-            "tool_sequence_json": json.dumps(["get_hydrology"]),
+            ],
             "status": "active",
         }
         with patch.object(store, "get_procedure", return_value=proc), \
@@ -383,17 +382,18 @@ class TestPromoteToSkill:
             assert "获取各站实时水情" in req.instructions
             mock_mark.assert_called_once_with(1)
 
-    def test_promote_conflict_marks_promoted(self):
+    def test_promote_conflict_keeps_procedure_active(self):
         from agent.memory.procedure_store import ProcedureStore
-        store = ProcedureStore("h", 3306, "u", "p", "d")
-        proc = {"id": 1, "name": "x", "applicability": "y", "steps_json": "[]",
-                "tool_sequence_json": "[]", "status": "active"}
+        store = ProcedureStore()
+        proc = {"id": 1, "name": "retry_weather", "applicability": "查询天气失败允许重试时",
+                "steps": [{"step": 1, "action": "查询", "tool": "get_weather"}], "status": "active"}
         with patch.object(store, "get_procedure", return_value=proc), \
              patch.object(store, "mark_promoted") as mock_mark, \
-             patch("agent.skills.create_skill", side_effect=ValueError("同名")):
+             patch("agent.skills.create_skill", side_effect=ValueError("同名")) as create:
             result = store.promote_to_skill(1)
             assert result["ok"] is False
-            mock_mark.assert_called_once()
+            create.assert_called_once()
+            mock_mark.assert_not_called()
 
     def test_snake_name(self):
         from agent.memory.procedure_store import ProcedureStore
@@ -420,10 +420,14 @@ class TestExperienceAggregation:
             store = MagicMock()
             store.enabled = True
             store.list_semantic.return_value = [
-                {"id": 1, "title": "龙门警戒水位", "content": "377.5m"}]
+                {"id": 1, "title": "龙门警戒水位", "content": "377.5m",
+                 "reuse_when": "回答龙门警戒水位相关问题时",
+                                "evidence": [{"source_id": "tool:0:search_regulation",
+                                              "quote": "龙门警戒水位：377.5m",
+                                              "source_ref": None}]}]
             mock_get.return_value = store
             from agent.memory import vector_index
-            with patch.object(vector_index, "search_semantic", return_value=None):
+            with patch.object(vector_index, "search_semantic", return_value=store.list_semantic.return_value):
                 from agent.memory.experience import get_semantic_knowledge
                 out = get_semantic_knowledge("龙门水位")
                 assert "龙门警戒水位" in out and "【已积累领域知识】" in out
@@ -459,7 +463,6 @@ class TestCuratorPromotion:
             mock_get.return_value = store
             with patch.object(curator, "_compact_semantic", return_value=0), \
                  patch.object(curator, "_refine_procedures", return_value=0), \
-                 patch.object(curator, "_reconcile_indexes", return_value=0), \
                  patch("agent.memory.longterm.repair_index", return_value=0):
                 stats = curator.run_curation_once()
             assert stats["promoted"] == 1
@@ -472,7 +475,7 @@ class TestReflectionEndToEnd:
         reflection = _reflection_output(
             longterm_edits=[{"topic": "user-prefs", "action": "create",
                              "content": "偏好简洁回答"}],
-            semantic_memories=[{"title": "吴堡警戒", "content": "640m", "tags": []}],
+            semantic_memories=[_semantic_memory("吴堡警戒", "640m")],
             episode={"event_summary": "查询成功", "resolution": "直接返回",
                      "outcome": "success"},
             procedure={"worthy": False},
@@ -484,13 +487,13 @@ class TestReflectionEndToEnd:
             ms.return_value = MagicMock(enabled=True, add_semantic=MagicMock(return_value=1))
             me.return_value = MagicMock(enabled=True, add_episode=MagicMock(return_value=1))
             mm.return_value = MagicMock(enabled=True, add_reflection=MagicMock(return_value=1))
-            with patch.object(_reflection_writer, "_index_semantic"), patch.object(_reflection_writer, "_index_episode"):
-                rf._run_reflection_sync(
-                    user_query="吴堡水情", final_answer="流量 3200",
-                    tool_calls=[{"tool_name": "get_hydrology", "arguments": {}}],
-                    tool_errors=[], rounds=2, trigger_reason="user_correction",
-                    format_retry=False, injected_memories=[],
-                )
+            rf._run_reflection_sync(
+                user_query="吴堡水情", final_answer="流量 3200",
+                tool_calls=[{"tool_name": "search_regulation", "arguments": {},
+                             "result": {"statement": "吴堡警戒：640m"}}],
+                tool_errors=[], rounds=2, trigger_reason="user_correction",
+                format_retry=False, injected_memories=[],
+            )
         # 长期记忆落盘（渐进式披露下主题全文经 read_topic 读取）
         assert "偏好简洁回答" in (longterm.read_topic("user-prefs") or "")
         # 三类 store 均收到写入
@@ -501,21 +504,22 @@ class TestReflectionEndToEnd:
 # ============ 一致性与接线修复（向量清理 / demote 校验 / 主开关 / 保留名） ============
 
 class TestDemoteValidation:
-    """demote 只允许处理本次真实注入过的 id（LLM 幻觉 id 不得误删）。"""
+    """语义冲突只审计真实注入过的 id，不执行自动删除。"""
 
     def test_hallucinated_id_ignored(self):
         with patch("agent.memory.semantic_store.get_semantic_store") as ms:
             store = MagicMock()
             store.delete_semantic.return_value = True
             ms.return_value = store
-            with patch.object(_reflection_writer, "_remove_semantic") as mock_remove:
-                demoted = _reflection_writer._demote_ineffective(
-                    {"semantic_ids": [1, 2]},
-                    injected_memories=[{"id": 1, "content": "x", "kind": "semantic"}],
-                )
-            assert demoted == 1
-            store.delete_semantic.assert_called_once_with(1)
-            mock_remove.assert_called_once_with(1)
+            context = {}
+            demoted = _reflection_writer._demote_ineffective(
+                {"semantic_ids": [1, 2, True, 1.5]},
+                injected_memories=[{"id": 1, "content": "x", "kind": "semantic"}],
+                review_context=context,
+            )
+            assert demoted == 0
+            assert context["semantic_review_ids"] == [1]
+            store.delete_semantic.assert_not_called()
 
     def test_no_injection_no_demote(self):
         with patch("agent.memory.semantic_store.get_semantic_store") as ms, \
@@ -565,8 +569,7 @@ class TestCuratorCompactGate:
     def test_unsafe_merge_skipped_and_safe_indexed(self):
         from agent.memory import curator
         with patch("agent.memory.semantic_store.get_semantic_store") as ms, \
-             patch('agent.memory.reflection_llm._llm_compact_semantic') as mllm, \
-             patch("agent.memory.vector_index.index_semantic") as mindex:
+             patch('agent.memory.reflection_llm._llm_compact_semantic') as mllm:
             store = MagicMock()
             store.enabled = True
             store.fetch_for_compact.return_value = [
@@ -583,7 +586,6 @@ class TestCuratorCompactGate:
             created = curator._compact_semantic()
             assert created == 0
             store.add_semantic.assert_not_called()
-            mindex.assert_not_called()
             store.delete_many.assert_not_called()  # 源条目保留，不因拦截而丢数据
 
 
@@ -619,7 +621,7 @@ class TestExperienceReadGate:
             mock_get.return_value = store
             from agent.memory import vector_index
             with patch.object(vector_index, "search_semantic",
-                              return_value=[{"id": 1, "score": 0.9}, {"id": 2, "score": 0.8}]):
+                              return_value=store.get_by_ids.return_value):
                 from agent.memory.experience import get_semantic_knowledge
                 out = get_semantic_knowledge("龙门水位")
         assert "[2026-09-01] 龙门警戒水位" in out      # 日期标注时效
@@ -645,12 +647,17 @@ class TestSemanticWriteDedup:
             store = MagicMock()
             store.enabled = True
             store.list_semantic.return_value = [
-                {"id": 1, "title": "龙门警戒水位", "content": "377.5m"}]
+                {"id": 1, "title": "龙门警戒水位", "content": "377.5m",
+                 "reuse_when": "回答龙门警戒水位相关问题时",
+                                "evidence": [{"source_id": "tool:0:search_regulation",
+                                              "quote": "龙门警戒水位：377.5m",
+                                              "source_ref": None}]}]
             mock_get.return_value = store
             n = _reflection_writer._dispatch_semantic(_reflection_output(semantic_memories=[
-                {"title": "龙门警戒水位", "content": "377.5m", "tags": []},
-            ]), "query")
+                _semantic_memory("龙门警戒水位", "377.5m"),
+            ]), {"tool:0:search_regulation": "龙门警戒水位：377.5m"})
             assert n == 0  # 与近期条目近重复 → 不写
+            store.list_semantic.assert_called_once_with(limit=50)
             store.add_semantic.assert_not_called()
 
     def test_genuinely_new_semantic_written(self):
@@ -661,10 +668,9 @@ class TestSemanticWriteDedup:
             store.list_semantic.return_value = [
                 {"id": 1, "title": "龙门警戒水位", "content": "377.5m"}]
             mock_get.return_value = store
-            with patch.object(_reflection_writer, "_index_semantic"):
-                n = _reflection_writer._dispatch_semantic(_reflection_output(semantic_memories=[
-                    {"title": "吴堡站特点", "content": "黄河中游控制站，无区间入流", "tags": []},
-                ]), "query")
+            n = _reflection_writer._dispatch_semantic(_reflection_output(semantic_memories=[
+                _semantic_memory("吴堡站特点", "黄河中游控制站，无区间入流"),
+            ]), {"tool:0:search_regulation": "吴堡站特点：黄河中游控制站，无区间入流"})
             assert n == 1  # 全新知识正常写入
             store.add_semantic.assert_called_once()
 

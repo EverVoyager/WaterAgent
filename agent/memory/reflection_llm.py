@@ -34,8 +34,10 @@ def _llm_compact_semantic(
     input_memories = [
         {
             "id": m["id"],
-            "content": (m.get("title", "") + "：" + m.get("content", ""))[:200],
+            "title": m.get("title", ""),
+            "content": m.get("content", ""),
             "updated_at": str(m.get("updated_at", "")),
+            "reuse_when": m.get("reuse_when", ""),
         }
         for m in memories
     ]
@@ -85,6 +87,7 @@ def _generate_reflection(reflection_input: dict[str, Any]) -> dict[str, Any] | N
         "format_retry": reflection_input["format_retry"],
         # 本次注入的记忆（效果闭环：被注入后仍被纠正 → demote 降权）
         "injected_memories": (reflection_input.get("injected_memories") or [])[:10],
+        "semantic_sources": reflection_input.get("semantic_sources", {}),
     }
 
     user_prompt = f"对话摘要：\n{json.dumps(input_truncated, ensure_ascii=False, indent=2)}"
@@ -105,6 +108,7 @@ def _generate_reflection(reflection_input: dict[str, Any]) -> dict[str, Any] | N
 
     content = strip_think((resp.choices[0].message.content or "").strip())
     result = parse_json_from_llm(content)
-    if result is None:
-        logger.warning("[reflection] LLM 返回非 JSON | content=%s", content[:200])
+    if not isinstance(result, dict):
+        logger.warning("[reflection] LLM 返回非 JSON object | content=%s", content[:200])
+        return None
     return result

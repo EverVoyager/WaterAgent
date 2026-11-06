@@ -1,6 +1,6 @@
 """记忆检索阈值（MIN_SCORE=0.35）校准脚本。
 
-用分布说话，替代拍脑袋：拉取三个记忆 collection 的全量向量，输出两组相似度分布——
+拉取三个独立校准集合的全量向量（先运行 seed_calibration_memories.py），输出两组相似度分布——
 1. 记忆两两相似度（冗余视图）：高分尾部 → 重复/可合并记忆
 2. 探针查询 vs 记忆（判别视图）：领域相关探针 vs 无关探针的分数分布，
    建议阈值取"无关探针 P95"（保证 95% 的无关查询被挡在外面）
@@ -155,9 +155,9 @@ def main() -> None:
     args = parser.parse_args()
 
     collections = [
-        ("agent_semantic_vec", vector_index.MIN_SCORE),
-        ("agent_episodes_vec", vector_index.MIN_SCORE),
-        ("agent_procedures_vec", vector_index.MIN_SCORE),
+        (vector_index.SEMANTIC_COLLECTION + "_calibration", vector_index.MIN_SCORE),
+        (vector_index.EPISODE_COLLECTION + "_calibration", vector_index.MIN_SCORE),
+        (vector_index.PROCEDURE_COLLECTION + "_calibration", vector_index.MIN_SCORE),
     ]
     print(f"当前 MIN_SCORE = {vector_index.MIN_SCORE}\n")
     suggestions = {}

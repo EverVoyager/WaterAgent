@@ -3,19 +3,19 @@
 注入体系：
 - 长期记忆（文件）：system prompt 常驻（longterm.build_longterm_section，三处注入）
 - 会话记忆：context_compact（现状不动）
-- 情景记忆：planner 第 1 轮「历史类似情形」top-2（向量，降级时间倒序）
-- 程序记忆：planner 第 1 轮「推荐方法」top-2（向量，降级时间倒序）
-- 语义记忆：synthesizer「领域知识」top-3（向量，降级时间倒序）
+- 情景记忆：planner 第 1 轮「历史类似情形」top-2（Qdrant 正文）
+- 程序记忆：planner 第 1 轮「推荐方法」top-2（Qdrant 正文）
+- 语义记忆：synthesizer「领域知识」top-3（Qdrant 正文）
 
 三态注入约定（与 vector_index 一致）：
-- None = 索引不可用 → 降级时间倒序（保底注入）
+- None = 正文检索不可用 → 不注入无关条目
 - []   = 索引可用但无相关 → 不注入（防无关记忆污染）
 - 非空 = 按相关性注入
 
 效果闭环（thread-local）：
 - 注入时记录 id（反思时评估有效性 → demote）
 - 请求完成后 finalize_injected_tracking(success) 计数
-  （语义记忆 hit_count++ / 程序记忆 use_count、success_count++）
+  （三类 hit_count++ / 程序记忆成功时 success_count++）
 """
 import logging
 import threading
@@ -40,28 +40,28 @@ def _passes_read_gate(*texts: str) -> bool:
 
     与写入侧同一套闸（注入载荷/敏感信息/领域事实）。领域事实闸对照的是
     当前 WARNING_THRESHOLDS——写入后阈值若调整，旧断言在此暴露，不再注入。
-    闸自身故障时放行（降级为信任写入侧校验，不阻塞主流程）。
+    闸自身故障时跳过该条记忆，不阻塞主流程。
     """
     try:
         from agent.memory.safety import check_memory_safety
         return check_memory_safety(*texts) is None
     except Exception:
-        return True
+        return False
 
 # ============ 注入追踪（效果闭环）============
 
 _local = threading.local()
 
 
-def _record_injected(kind: str, mem_id: int, content: str) -> None:
+def _record_injected(kind: str, mem_id: int | str, content: str) -> None:
     """记录一条被注入 prompt 的记忆（供反思评估有效性 + 完成后计数）。"""
-    if not isinstance(mem_id, int) or not content:
+    if type(mem_id) not in (int, str) or not content:
         return
     items = getattr(_local, "injected_memories", None)
     if items is None:
         items = []
         _local.injected_memories = items
-    if not any(it["id"] == mem_id for it in items):
+    if not any(it["id"] == mem_id and it["kind"] == kind for it in items):
         items.append({"id": mem_id, "content": content[:80], "kind": kind})
 
 
@@ -78,13 +78,14 @@ def get_injected_memories() -> list[dict[str, Any]]:
 def finalize_injected_tracking(success: bool) -> None:
     """请求完成后计数（runner 在 done/error 后调用）。
 
-    语义记忆 hit_count++（无论成败，命中即统计）；
-    程序记忆 use_count++ 且成功时 success_count++。
+    三类记忆 hit_count++（无论成败，实际注入才统计）；
+    程序记忆成功时 success_count++。
     """
     injected = get_injected_memories()
     if not injected:
         return
     semantic_ids = [it["id"] for it in injected if it.get("kind") == "semantic"]
+    episode_ids = [it["id"] for it in injected if it.get("kind") == "episode"]
     procedure_ids = [it["id"] for it in injected if it.get("kind") == "procedure"]
     try:
         if semantic_ids:
@@ -94,6 +95,14 @@ def finalize_injected_tracking(success: bool) -> None:
                 store.increment_hit(mid)
     except Exception as e:
         logger.debug("[experience] 语义命中计数失败：%s", e)
+    try:
+        if episode_ids:
+            from agent.memory.episode_store import get_episode_store
+            store = get_episode_store()
+            for mid in episode_ids:
+                store.increment_hit(mid)
+    except Exception as e:
+        logger.debug("[experience] 情景命中计数失败：%s", e)
     try:
         if procedure_ids:
             from agent.memory.procedure_store import get_procedure_store
@@ -145,15 +154,7 @@ def get_relevant_experiences(query: str) -> str:
 
 
 def _collect_episodes(query: str) -> list[dict[str, Any]]:
-    """情景记忆检索：向量优先，降级时间倒序。"""
-    try:
-        from agent.memory.episode_store import get_episode_store
-        store = get_episode_store()
-        if not store.enabled:
-            return []
-    except Exception:
-        return []
-
+    """直接使用 Qdrant 返回的正文，不回 SQL 读取。"""
     hits = None
     try:
         from agent.memory import vector_index
@@ -162,18 +163,7 @@ def _collect_episodes(query: str) -> list[dict[str, Any]]:
         logger.debug("[experience] 情景向量检索失败：%s", e)
         hits = None
 
-    if hits is None:
-        # 索引不可用 → 降级时间倒序保底
-        rows = store.list_episodes(limit=_EPISODE_CAP)
-    elif not hits:
-        return []  # 索引可用但无相关：不注入
-    else:
-        rows = store.get_by_ids([h["id"] for h in hits])
-        # 按相似度排序（hits 顺序）
-        order = {h["id"]: i for i, h in enumerate(hits)}
-        rows.sort(key=lambda r: order.get(r["id"], 999))
-
-    rows = [r for r in rows if _episode_readable(r)]
+    rows = [r for r in (hits or []) if _episode_readable(r)]
     for r in rows:
         _record_injected("episode", r.get("id", 0), r.get("event_summary", ""))
     return rows
@@ -188,15 +178,7 @@ def _episode_readable(ep: dict[str, Any]) -> bool:
 
 
 def _collect_procedures(query: str) -> list[dict[str, Any]]:
-    """程序记忆检索：向量优先，降级使用次数倒序。"""
-    try:
-        from agent.memory.procedure_store import get_procedure_store
-        store = get_procedure_store()
-        if not store.enabled:
-            return []
-    except Exception:
-        return []
-
+    """仅使用 Qdrant 返回的可用程序正文。"""
     hits = None
     try:
         from agent.memory import vector_index
@@ -205,16 +187,7 @@ def _collect_procedures(query: str) -> list[dict[str, Any]]:
         logger.debug("[experience] 程序向量检索失败：%s", e)
         hits = None
 
-    if hits is None:
-        rows = store.list_procedures(limit=_PROCEDURE_CAP, status="active")
-    elif not hits:
-        return []
-    else:
-        rows = store.get_by_ids([h["id"] for h in hits])
-        order = {h["id"]: i for i, h in enumerate(hits)}
-        rows.sort(key=lambda r: order.get(r["id"], 999))
-
-    rows = [r for r in rows if _procedure_readable(r)]
+    rows = [r for r in (hits or []) if r.get("status") == "active" and _procedure_readable(r)]
     for r in rows:
         _record_injected("procedure", r.get("id", 0), r.get("applicability", ""))
     return rows
@@ -232,12 +205,7 @@ def _procedure_readable(proc: dict[str, Any]) -> bool:
 
 def get_semantic_knowledge(query: str | None) -> str:
     """synthesizer 注入：领域知识（语义记忆）top-3。返回空串表示无可注入知识。"""
-    try:
-        from agent.memory.semantic_store import get_semantic_store
-        store = get_semantic_store()
-        if not store.enabled:
-            return ""
-    except Exception:
+    if not query:
         return ""
 
     hits = None
@@ -249,18 +217,10 @@ def get_semantic_knowledge(query: str | None) -> str:
             logger.debug("[experience] 语义向量检索失败：%s", e)
             hits = None
 
-    if hits is None:
-        rows = store.list_semantic(limit=_SEMANTIC_CAP)
-    elif not hits:
-        return ""
-    else:
-        rows = store.get_by_ids([h["id"] for h in hits])
-        order = {h["id"]: i for i, h in enumerate(hits)}
-        rows.sort(key=lambda r: order.get(r["id"], 999))
-
     filtered = []
-    for r in rows:
-        if _passes_read_gate(r.get("title", ""), r.get("content", "")):
+    for r in hits or []:
+        if _passes_read_gate(r.get("title", ""), r.get("content", ""),
+                             r.get("reuse_when", "")):
             filtered.append(r)
         else:
             logger.warning("[experience] 语义记忆 id=%s 未通过读时校验，跳过注入", r.get("id"))
@@ -274,5 +234,9 @@ def get_semantic_knowledge(query: str | None) -> str:
     for i, r in enumerate(rows, 1):
         date = _date_of(r.get("updated_at") or r.get("created_at"))
         date_tag = f"[{date}] " if date else ""
-        lines.append(f"  {i}. {date_tag}{r.get('title', '')}：{r.get('content', '')}")
+        reuse_when = r.get("reuse_when", "")
+        scope = f"（适用：{reuse_when}）" if reuse_when else ""
+        if not r.get("evidence"):
+            scope += "（来源未留存，需核实）"
+        lines.append(f"  {i}. {date_tag}{r.get('title', '')}：{r.get('content', '')}{scope}")
     return "【已积累领域知识】\n" + "\n".join(lines)

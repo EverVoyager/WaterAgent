@@ -232,8 +232,10 @@ curl -X POST http://localhost:8000/api/agent/query \
 | POST                 | `/api/agent/query/stream`               | 对话（SSE 流式）                |
 | GET/POST             | `/api/sessions`                         | 会话列表 / 创建（MySQL）        |
 | GET/PUT/PATCH/DELETE | `/api/sessions/{id}`                    | 会话详情 / 同步 / 改标题 / 删除 |
-| GET/DELETE           | `/api/memories`、`/api/memories/{id}` | 记忆治理（查询 / 删除）         |
-| POST                 | `/api/memories/compact`                 | LLM 语义压缩记忆                |
+| GET/POST/DELETE      | `/api/memories/semantic`、`/api/memories/semantic/{id}` | 语义记忆查询 / 添加 / 删除 |
+| GET                  | `/api/memories/episodes`、`/api/memories/procedures` | 情景 / 程序记忆查询 |
+| POST                 | `/api/memories/compact`                 | Curator 治理，仅合并完全重复项  |
+| POST                 | `/api/memories/review`                  | 指定历史反思复盘，返回候选建议  |
 | GET                  | `/api/memories/reflections`             | 反思日志审计                    |
 | GET/POST             | `/api/skills`、`/api/skills/tools`    | Skill CRUD / 内置工具清单       |
 | POST                 | `/api/skills/import`                    | 导入 .zip / .skill / .md 技能包 |
@@ -298,17 +300,62 @@ START → **planner**（Function Calling 规划 + 信息充分性判断）
 |---|---|---|
 | 会话记忆 | chat_sessions/messages + 上下文压缩 | planner / synthesizer（历史摘要） |
 | 长期记忆 | `MEMORY.md`（用户手册，Agent 只读）+ `memory/` 目录（Agent 自动记忆，索引+主题文件，frontmatter 带 created/updated） | 手册+索引三处常驻，主题按 query 相关性在预算内展开（渐进式披露）；`read_memory_topic` 工具按需读全文 |
-| 语义记忆 | `agent_semantic` 表 + Qdrant | synthesizer「领域知识」top-3（带日期标注） |
-| 情景记忆 | `agent_episodes` 表 + Qdrant | planner「历史类似情形」top-2（带日期标注） |
-| 程序记忆 | `agent_procedures` 表 + Qdrant | planner「推荐方法」top-2（带日期标注） |
+| 语义记忆 | Qdrant `agent_semantic_v2`：向量 + 完整 payload | synthesizer「领域知识」top-3（带日期标注） |
+| 情景记忆 | Qdrant `agent_episodes_v2`：向量 + 完整 payload | planner「历史类似情形」top-2（带日期标注） |
+| 程序记忆 | Qdrant `agent_procedures_v2`：向量 + 完整 payload | planner「推荐方法」top-2（带日期标注） |
 
-- **反思分发**：用户纠正 / 工具失败 / 多轮解决等触发异步反思（滚动窗口限流），LLM 输出分发到长期（文件）/ 语义 / 情景 / 程序四类存储；长期记忆仅在用户纠正/反馈偏好时写入（multi_round 推测的偏好不写），写入三道安全闸（提示词注入扫描、敏感信息过滤、rubric 质量门槛）+ 近重复查重
+三类正文与向量一起保存、更新、删除，召回直接使用 payload，不从 MySQL 读取正文。
+共同字段为 `id`、`created_at`、`updated_at`；新记录使用 UUID，迁移保留旧整数 ID。
+
+| 类型 | Qdrant 正文字段 | MySQL `agent_memory_usage` 统计 |
+|---|---|---|
+| 语义 | `title`、`content`、`reuse_when`、`evidence`（来源标识与证据原文） | `hit_count` |
+| 情景 | `event_summary`、`resolution`、`outcome`、`happened_at`、`source_refs`、`event_id` | `hit_count` |
+| 程序 | `name`、`applicability`、`steps`（连续编号、动作、可选工具）、`source_refs`、`status` | `hit_count`、`success_count`、`refined_count` |
+
+统计表以 `(memory_type, memory_id)` 联合标识记录，避免三类旧整数 ID 冲突；另外记录 `last_hit_at`。
+程序工具序列由 `steps` 派生，不再重复保存。`event_id` 支持显式关联非连续事件片段；
+当前反思默认每次生成独立事件，尚未增加跨话题的自动任务归属判断。
+
+- **反思分发**：用户纠正 / 工具失败 / 多轮解决等触发异步反思（滚动窗口限流），LLM 输出分发到长期（文件）/ 语义 / 情景 / 程序四类存储；长期记忆仅在用户纠正/反馈偏好时写入（multi_round 推测的偏好不写），写入安全及来源准入闸；语义记忆仅在正文、条件和证据一致时查重
+- **证据与复盘**：知识类型用于自动写入准入判断，正文保存适用条件及证据；按需选择历史反思生成知识/流程/冲突候选，仅写审计。旧记录缺少原始证据时明确跳过
 - **读时安全闸**：长期主题与语义/情景/程序记忆在注入前对照当前 `WARNING_THRESHOLDS` 复检领域事实断言——阈值调整后，含旧断言的记忆立即停止注入（过期可发现）
 - **程序记忆成长闭环**：反思写入具体模式 → Curator 周期提炼为通用步骤（LLM 泛化）→ 高复用高质量程序自动晋升候选 Skill（`enabled=false` 人工确认启用）
-- **效果闭环**：注入记忆线程级追踪，请求完成后计数（语义 hit_count / 程序 use_count+success_count），反思可 demote 无效记忆（仅限本次真实注入过的 id）
-- **Curator 五步治理**（周期后台线程）：剪枝僵尸记忆 → 语义压缩合并 → 程序提炼 → 晋升检查 → 向量索引对账 + memory/ 目录索引修复（含孤儿索引行清理）
-- **治理 API**：`/api/memories/*` 支持手册读写、自动记忆主题编辑、语义/情景/程序查询删除、手动晋升、反思审计；`MEMORY_ADMIN_API_KEY` 非空时要求 X-API-Key
-- **降级**：MySQL 未配置时长期记忆（文件）仍可用，其余类型自动禁用
+- **效果闭环**：实际注入回答的三类记忆在请求完成后递增 `hit_count`；程序在请求成功时递增 `success_count`。语义冲突记入审计待复核，程序记忆仍可停用（仅限本次真实注入过的 ID）
+- **Curator 治理**：剪枝零命中旧语义记录、清理旧情景、合并完整正文和条件完全相同的重复项、程序提炼晋升、修复 memory/ 目录索引。合并正文和计数确认保存后才删源记录；不再从 SQL 清空重建 Qdrant 主集合
+- **治理 API**：`/api/memories/*` 支持手册读写、自动记忆主题编辑、三类正文查询、语义记忆添加删除、手动晋升、反思审计；`MEMORY_ADMIN_API_KEY` 非空时要求 X-API-Key
+- **故障处理**：MySQL 未配置或故障时，文件和 Qdrant 记忆仍可读写，统计返回 `null` 表示未知，依赖计数的剪枝/提炼/晋升跳过。审计、历史复盘、会话和 Skill 持久化仍依赖 MySQL。Qdrant 或 embedding 不可用时跳过召回、正文写入明确报错，避免注入无关记录
+
+按需复盘：先从 `GET /api/memories/reflections` 选择 2～10 条反思，再调用
+`POST /api/memories/review`（沿用 `X-API-Key` 治理鉴权）：
+
+```json
+{"reflection_ids": [12, 18], "focus": "核对降雨字段的单位、时间窗口及查询失败的处理方式"}
+```
+
+返回 `review_id`、`candidates`、`skipped` 和被拒绝候选数；结果可在反思列表的 `context` 中再次查看。
+候选不自动写入记忆或 Skill。旧记录没有原始来源时不调用模型补造证据。
+首次使用为 `agent_reflections` 增加可空 `context_json JSON` 列，并建立独立统计表；
+保留旧记录，数据库账号需有对应建表/增列权限。
+
+旧版三类 SQL 正文需在切换服务前迁移。停止应用和 Curator 写入后，在项目根目录执行
+（加载 `backend/.env`；需要 MySQL、Qdrant 和当前 embedding 服务）：
+
+```powershell
+python backend/scripts/migrate_memory_content.py export --backup memory-content-backup.json.local
+python backend/scripts/migrate_memory_content.py import --backup memory-content-backup.json.local
+```
+
+导出使用同一只读 SQL 快照和主键分页，完整保留旧字段并校验文件摘要，已有备份禁止覆盖。
+示例备份以 `.local` 结尾，被 Git 忽略；应另外复制到受保护的持久备份位置。
+导入逐条校验正文和统计：旧 `use_count` 映射为 `hit_count`，缺失证据不补造，
+时区不明的旧时间不参与自动过期删除。重跑不会重复累加计数或覆盖已经变更的新正文。
+返回 `conflicts` / `skipped` / `failed` 时退出码非零，旧表和旧 `*_vec` 集合均保留，
+应按 ID 核查再启动服务；未迁入的记录不会自动从旧表回填。
+
+迁移完成后，三类正文的备份以 Qdrant 快照为准，SQL 备份只覆盖统计及其他 SQL 功能。
+恢复旧程序前可保留这些新集合；旧表仍在，但切换后新增正文不会写回旧表。
+校准脚本只使用独立的 `*_v2_calibration` 集合，不改动正文集合。
 
 #### Skill 系统
 

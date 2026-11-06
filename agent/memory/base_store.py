@@ -68,8 +68,12 @@ class BaseStore:
                 with self._get_conn() as conn, conn.cursor() as cur:
                     for sql in self._create_sqls:
                         cur.execute(sql)
+                    self._migrate_schema(cur)
                 logger.info("[store] %s 表已就绪", type(self).__name__)
                 self._initialized = True
             except Exception as e:
                 logger.error("[store] %s 建表失败：%s", type(self).__name__, e)
                 raise RuntimeError(f"{type(self).__name__} 建表失败：{e}") from e
+
+    def _migrate_schema(self, cursor) -> None:
+        """子类在同一初始化锁内执行兼容旧表的增列。"""

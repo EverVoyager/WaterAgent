@@ -2,8 +2,7 @@
 
 动机：线上记忆库仅个位数向量时，分布校准没有统计意义。本脚本批量构造
 贴近真实业务的记忆文本（语义=领域知识 / 情景=历史事件 / 程序=任务步骤），
-embed 后以 payload kind=calibration_seed 写入三个 collection，id 从 900000 起
-（远超 MySQL 自增区间，不与真实数据冲突）。
+embed 后以 payload kind=calibration_seed 写入三个独立校准集合，id 从 900000 起。
 
 用法（项目根目录，需 Qdrant + embedding 服务可用）：
     python backend/scripts/seed_calibration_memories.py            # 播种
@@ -97,11 +96,11 @@ _PROCEDURES = [
 ]
 
 _POOL = [
-    (vector_index.SEMANTIC_COLLECTION,
+    (vector_index.SEMANTIC_COLLECTION + "_calibration",
      [f"{t}。{c}" for t, c in _SEMANTIC]),
-    (vector_index.EPISODE_COLLECTION,
+    (vector_index.EPISODE_COLLECTION + "_calibration",
      [f"{s}。{r}" for s, r in _EPISODES]),
-    (vector_index.PROCEDURE_COLLECTION,
+    (vector_index.PROCEDURE_COLLECTION + "_calibration",
      [a for a, _ in _PROCEDURES]),
 ]
 
